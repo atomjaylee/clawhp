@@ -1,0 +1,5 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="72" y="72" width="880" height="880" rx="232" fill="#0D2430"/>
+  <rect x="72" y="72" width="880" height="880" rx="232" stroke="#163946" stroke-width="8"/>
+  <image href="./legacy-claw.png" x="302" y="302" width="420" height="420" preserveAspectRatio="xMidYMid meet"/>
+</svg>
