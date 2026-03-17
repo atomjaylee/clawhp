@@ -125,12 +125,15 @@ export default function AgentsPage() {
   ) => {
     if (!agentToLoad) {
       setWorkspaceSnapshot(null);
+      setWorkspaceLoading(false);
       return;
     }
 
-    const requestedFile = preferredFile ?? selectedWorkspaceFile ?? WORKSPACE_FILE_DEFS[0].name;
+    const requestedFile = preferredFile ?? WORKSPACE_FILE_DEFS[0].name;
     const cachedSnapshot = workspaceCacheRef.current[agentToLoad.id];
     if (!options?.force && cachedSnapshot && cachedSnapshot.selectedFileName === requestedFile) {
+      setWorkspaceLoading(false);
+      setWorkspaceError("");
       applyWorkspaceSnapshot(cachedSnapshot);
       return;
     }
@@ -173,7 +176,7 @@ export default function AgentsPage() {
         setWorkspaceLoading(false);
       }
     }
-  }, [applyWorkspaceSnapshot, selectedWorkspaceFile]);
+  }, [applyWorkspaceSnapshot]);
 
   const activeAgent = useMemo(
     () => agents.find((agent) => agent.id === selectedAgentId) ?? agents[0] ?? null,
@@ -189,11 +192,16 @@ export default function AgentsPage() {
       setWorkspaceSnapshot(null);
       setWorkspaceDraft("");
       setWorkspaceDirty(false);
+      setWorkspaceLoading(false);
+      setWorkspaceError("");
+      setWorkspaceSuccess("");
       return;
     }
 
     const cachedSnapshot = workspaceCacheRef.current[activeAgent.id];
     if (cachedSnapshot) {
+      setWorkspaceLoading(false);
+      setWorkspaceError("");
       applyWorkspaceSnapshot(cachedSnapshot);
       return;
     }
@@ -477,8 +485,8 @@ export default function AgentsPage() {
                         </Badge>
                       </div>
                     </div>
-                    <ScrollArea className="max-h-[320px] xl:h-[calc(100vh-250px)] xl:max-h-[calc(100vh-250px)]">
-                      <div className="space-y-2 p-3">
+                    <div className="max-h-[320px] overflow-y-auto p-3 xl:h-[calc(100vh-250px)] xl:max-h-[calc(100vh-250px)]">
+                      <div className="space-y-2 pr-1">
                         {agents.map((agent) => (
                           <AgentListItem
                             key={agent.id}
@@ -490,7 +498,7 @@ export default function AgentsPage() {
                           />
                         ))}
                       </div>
-                    </ScrollArea>
+                    </div>
                   </CardContent>
                 </Card>
 
