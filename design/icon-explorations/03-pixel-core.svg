@@ -1,0 +1,148 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="122" y1="98" x2="894" y2="926" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0F2531"/>
+      <stop offset="0.58" stop-color="#091A24"/>
+      <stop offset="1" stop-color="#061118"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(512 430) rotate(90) scale(314 326)">
+      <stop stop-color="#2CD4D9" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#2CD4D9" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="panel" x1="228" y1="220" x2="782" y2="804" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#194C59" stop-opacity="0.58"/>
+      <stop offset="1" stop-color="#0D2630" stop-opacity="0.34"/>
+    </linearGradient>
+    <filter id="panelShadow" x="172" y="174" width="680" height="680" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dy="18"/>
+      <feGaussianBlur stdDeviation="24"/>
+      <feComposite in2="hardAlpha" operator="out"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.00784314 0 0 0 0 0.105882 0 0 0 0 0.12549 0 0 0 0.4 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_0_1"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_0_1" result="shape"/>
+    </filter>
+  </defs>
+
+  <rect x="64" y="64" width="896" height="896" rx="232" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="232" stroke="#173F4C" stroke-width="10"/>
+
+  <circle cx="512" cy="430" r="314" fill="url(#glow)"/>
+  <path d="M156 256C220 180 318 136 428 126" stroke="#8AFFF2" stroke-opacity="0.14" stroke-width="16" stroke-linecap="round"/>
+  <path d="M666 852C760 838 842 780 886 684" stroke="#FF8F63" stroke-opacity="0.14" stroke-width="16" stroke-linecap="round"/>
+
+  <g filter="url(#panelShadow)">
+    <rect x="204" y="204" width="616" height="616" rx="172" fill="url(#panel)"/>
+    <rect x="204" y="204" width="616" height="616" rx="172" stroke="#A4FFF4" stroke-opacity="0.18" stroke-width="8"/>
+    <path d="M282 282H744" stroke="#8EFFF6" stroke-opacity="0.12" stroke-width="6" stroke-linecap="round"/>
+    <path d="M282 334H744" stroke="#8EFFF6" stroke-opacity="0.07" stroke-width="6" stroke-linecap="round"/>
+    <path d="M282 386H744" stroke="#8EFFF6" stroke-opacity="0.05" stroke-width="6" stroke-linecap="round"/>
+    <path d="M282 438H744" stroke="#8EFFF6" stroke-opacity="0.05" stroke-width="6" stroke-linecap="round"/>
+  </g>
+
+  <rect x="252" y="252" width="54" height="20" rx="10" fill="#A5FFF4" fill-opacity="0.24"/>
+  <rect x="320" y="252" width="54" height="20" rx="10" fill="#A5FFF4" fill-opacity="0.18"/>
+  <rect x="388" y="252" width="54" height="20" rx="10" fill="#A5FFF4" fill-opacity="0.12"/>
+  <rect x="704" y="252" width="48" height="48" rx="12" fill="#30D4D6" fill-opacity="0.16"/>
+  <rect x="716" y="264" width="24" height="24" rx="6" fill="#93FFF4" fill-opacity="0.62"/>
+
+  <g transform="translate(240 236) scale(34)" shape-rendering="crispEdges">
+    <rect width="16" height="16" fill="none"/>
+
+    <g fill="#0A131A" opacity="0.22" transform="translate(0.45 0.6)">
+      <rect x="1" y="5" width="1" height="3"/>
+      <rect x="2" y="4" width="1" height="1"/>
+      <rect x="2" y="8" width="1" height="1"/>
+      <rect x="3" y="3" width="1" height="1"/>
+      <rect x="3" y="9" width="1" height="1"/>
+      <rect x="4" y="2" width="1" height="1"/>
+      <rect x="4" y="10" width="1" height="1"/>
+      <rect x="5" y="2" width="6" height="1"/>
+      <rect x="11" y="2" width="1" height="1"/>
+      <rect x="12" y="3" width="1" height="1"/>
+      <rect x="12" y="9" width="1" height="1"/>
+      <rect x="13" y="4" width="1" height="1"/>
+      <rect x="13" y="8" width="1" height="1"/>
+      <rect x="14" y="5" width="1" height="3"/>
+      <rect x="5" y="11" width="6" height="1"/>
+      <rect x="4" y="12" width="1" height="1"/>
+      <rect x="11" y="12" width="1" height="1"/>
+      <rect x="3" y="13" width="1" height="1"/>
+      <rect x="12" y="13" width="1" height="1"/>
+      <rect x="5" y="14" width="6" height="1"/>
+      <rect x="5" y="3" width="6" height="1"/>
+      <rect x="4" y="4" width="8" height="1"/>
+      <rect x="3" y="5" width="10" height="1"/>
+      <rect x="3" y="6" width="10" height="1"/>
+      <rect x="3" y="7" width="10" height="1"/>
+      <rect x="4" y="8" width="8" height="1"/>
+      <rect x="5" y="9" width="6" height="1"/>
+      <rect x="5" y="12" width="6" height="1"/>
+      <rect x="6" y="13" width="4" height="1"/>
+      <rect x="1" y="6" width="2" height="1"/>
+      <rect x="2" y="5" width="1" height="1"/>
+      <rect x="2" y="7" width="1" height="1"/>
+      <rect x="13" y="6" width="2" height="1"/>
+      <rect x="13" y="5" width="1" height="1"/>
+      <rect x="13" y="7" width="1" height="1"/>
+    </g>
+
+    <g fill="#3A0A0D">
+      <rect x="1" y="5" width="1" height="3"/>
+      <rect x="2" y="4" width="1" height="1"/>
+      <rect x="2" y="8" width="1" height="1"/>
+      <rect x="3" y="3" width="1" height="1"/>
+      <rect x="3" y="9" width="1" height="1"/>
+      <rect x="4" y="2" width="1" height="1"/>
+      <rect x="4" y="10" width="1" height="1"/>
+      <rect x="5" y="2" width="6" height="1"/>
+      <rect x="11" y="2" width="1" height="1"/>
+      <rect x="12" y="3" width="1" height="1"/>
+      <rect x="12" y="9" width="1" height="1"/>
+      <rect x="13" y="4" width="1" height="1"/>
+      <rect x="13" y="8" width="1" height="1"/>
+      <rect x="14" y="5" width="1" height="3"/>
+      <rect x="5" y="11" width="6" height="1"/>
+      <rect x="4" y="12" width="1" height="1"/>
+      <rect x="11" y="12" width="1" height="1"/>
+      <rect x="3" y="13" width="1" height="1"/>
+      <rect x="12" y="13" width="1" height="1"/>
+      <rect x="5" y="14" width="6" height="1"/>
+    </g>
+
+    <g fill="#FF4F40">
+      <rect x="5" y="3" width="6" height="1"/>
+      <rect x="4" y="4" width="8" height="1"/>
+      <rect x="3" y="5" width="10" height="1"/>
+      <rect x="3" y="6" width="10" height="1"/>
+      <rect x="3" y="7" width="10" height="1"/>
+      <rect x="4" y="8" width="8" height="1"/>
+      <rect x="5" y="9" width="6" height="1"/>
+      <rect x="5" y="12" width="6" height="1"/>
+      <rect x="6" y="13" width="4" height="1"/>
+    </g>
+
+    <g fill="#FF775F">
+      <rect x="1" y="6" width="2" height="1"/>
+      <rect x="2" y="5" width="1" height="1"/>
+      <rect x="2" y="7" width="1" height="1"/>
+      <rect x="13" y="6" width="2" height="1"/>
+      <rect x="13" y="5" width="1" height="1"/>
+      <rect x="13" y="7" width="1" height="1"/>
+    </g>
+
+    <g fill="#081016">
+      <rect x="6" y="5" width="1" height="1"/>
+      <rect x="9" y="5" width="1" height="1"/>
+    </g>
+
+    <g fill="#F5FBFF">
+      <rect x="6" y="4" width="1" height="1"/>
+      <rect x="9" y="4" width="1" height="1"/>
+    </g>
+  </g>
+
+  <circle cx="796" cy="228" r="84" fill="#7AF7EC" fill-opacity="0.15"/>
+  <path d="M244 790C314 846 410 878 514 878" stroke="#8AFFF2" stroke-opacity="0.12" stroke-width="14" stroke-linecap="round"/>
+</svg>

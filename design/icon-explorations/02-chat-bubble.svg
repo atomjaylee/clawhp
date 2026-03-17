@@ -1,0 +1,60 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="136" y1="108" x2="900" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#102734"/>
+      <stop offset="0.58" stop-color="#091924"/>
+      <stop offset="1" stop-color="#061017"/>
+    </linearGradient>
+    <radialGradient id="screenGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(478 398) rotate(90) scale(322 340)">
+      <stop stop-color="#2CD4D9" stop-opacity="0.3"/>
+      <stop offset="1" stop-color="#2CD4D9" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="panelFill" x1="188" y1="204" x2="750" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1A5A69" stop-opacity="0.58"/>
+      <stop offset="1" stop-color="#102F3A" stop-opacity="0.36"/>
+    </linearGradient>
+    <linearGradient id="clawStroke" x1="302" y1="316" x2="760" y2="774" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF8A70"/>
+      <stop offset="0.55" stop-color="#FF5B46"/>
+      <stop offset="1" stop-color="#D93A2B"/>
+    </linearGradient>
+    <filter id="softShadow" x="140" y="180" width="744" height="632" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dy="16"/>
+      <feGaussianBlur stdDeviation="20"/>
+      <feComposite in2="hardAlpha" operator="out"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.0117647 0 0 0 0 0.145098 0 0 0 0 0.156863 0 0 0 0.36 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_0_1"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_0_1" result="shape"/>
+    </filter>
+  </defs>
+
+  <rect x="64" y="64" width="896" height="896" rx="232" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="232" stroke="#163E4A" stroke-width="10"/>
+
+  <circle cx="478" cy="398" r="322" fill="url(#screenGlow)"/>
+  <circle cx="796" cy="234" r="114" fill="#0F2E3A"/>
+
+  <g filter="url(#softShadow)">
+    <path d="M236 212C193.027 212 158 247.027 158 290V516C158 558.973 193.027 594 236 594H374V706C374 724.022 395.044 733.902 408.93 722.401L560 594H710C752.973 594 788 558.973 788 516V290C788 247.027 752.973 212 710 212H236Z" fill="url(#panelFill)"/>
+    <path d="M236 212C193.027 212 158 247.027 158 290V516C158 558.973 193.027 594 236 594H374V706C374 724.022 395.044 733.902 408.93 722.401L560 594H710C752.973 594 788 558.973 788 516V290C788 247.027 752.973 212 710 212H236Z" stroke="#A2FFF4" stroke-opacity="0.2" stroke-width="8"/>
+  </g>
+
+  <rect x="210" y="270" width="48" height="18" rx="9" fill="#A5FFF4" fill-opacity="0.26"/>
+  <rect x="272" y="270" width="48" height="18" rx="9" fill="#A5FFF4" fill-opacity="0.2"/>
+  <rect x="334" y="270" width="48" height="18" rx="9" fill="#A5FFF4" fill-opacity="0.14"/>
+
+  <g transform="translate(18 24)">
+    <path d="M640 362C596 324 538 302 474 302C327 302 208 421 208 568C208 715 327 834 474 834C557 834 632 796 682 736" stroke="url(#clawStroke)" stroke-width="122" stroke-linecap="round"/>
+    <path d="M640 362L776 314" stroke="url(#clawStroke)" stroke-width="112" stroke-linecap="round"/>
+    <path d="M648 688L758 780" stroke="url(#clawStroke)" stroke-width="74" stroke-linecap="round"/>
+    <circle cx="496" cy="568" r="94" fill="#122631" stroke="#FF8D73" stroke-width="24"/>
+    <path d="M498 520C552 520 596 564 596 618" stroke="#FFD3C7" stroke-width="20" stroke-linecap="round"/>
+  </g>
+
+  <circle cx="794" cy="238" r="90" fill="#7AF7EC" fill-opacity="0.22"/>
+  <circle cx="794" cy="238" r="70" fill="#7AF7EC" fill-opacity="0.12"/>
+  <path d="M154 254C214 186 304 140 408 126" stroke="#8AFFF2" stroke-opacity="0.16" stroke-width="16" stroke-linecap="round"/>
+  <path d="M658 852C756 840 840 782 884 684" stroke="#FF8F63" stroke-opacity="0.14" stroke-width="16" stroke-linecap="round"/>
+</svg>
