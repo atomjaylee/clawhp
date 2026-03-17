@@ -16,10 +16,44 @@ jobs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Get version from tag
         id: get_version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-v:refname | head -2 | tail -1)
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+
+          if [ "$PREV_TAG" = "$CURRENT_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s (%h)" HEAD)
+          else
+            COMMITS=$(git log --pretty=format:"- %s (%h)" ${PREV_TAG}..${CURRENT_TAG})
+          fi
+
+          FEATURES=$(echo "$COMMITS" | grep -iE "^- (feat|feature)" || true)
+          FIXES=$(echo "$COMMITS" | grep -iE "^- fix" || true)
+          OTHERS=$(echo "$COMMITS" | grep -viE "^- (feat|feature|fix)" || true)
+
+          BODY=""
+          if [ -n "$FEATURES" ]; then
+            BODY="${BODY}## 🚀 新功能\n${FEATURES}\n\n"
+          fi
+          if [ -n "$FIXES" ]; then
+            BODY="${BODY}## 🐛 Bug 修复\n${FIXES}\n\n"
+          fi
+          if [ -n "$OTHERS" ]; then
+            BODY="${BODY}## 🔧 其他变更\n${OTHERS}\n\n"
+          fi
+
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "body<<$EOF" >> $GITHUB_OUTPUT
+          echo -e "$BODY" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
 
       - name: Create Release
         id: create_release
@@ -27,9 +61,9 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: OpenClaw Installer ${{ steps.get_version.outputs.VERSION }}
+          body: ${{ steps.changelog.outputs.body }}
           draft: true
           prerelease: false
-          generate_release_notes: true
 
   build:
     needs: create-release

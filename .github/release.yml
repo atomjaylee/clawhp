@@ -1,0 +1,24 @@
+changelog:
+  categories:
+    - title: "🚀 新功能"
+      labels:
+        - enhancement
+        - feature
+    - title: "🐛 Bug 修复"
+      labels:
+        - bug
+        - fix
+    - title: "📝 文档更新"
+      labels:
+        - documentation
+    - title: "🔧 维护与优化"
+      labels:
+        - chore
+        - refactor
+        - performance
+    - title: "📦 依赖更新"
+      labels:
+        - dependencies
+    - title: "其他变更"
+      labels:
+        - "*"
