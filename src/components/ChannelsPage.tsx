@@ -1002,34 +1002,37 @@ export default function ChannelsPage() {
   return (
     <TooltipProvider delayDuration={300}>
       <ScrollArea className="flex-1">
-        <div className="space-y-4 p-5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/10">
-                <MessageSquare size={15} className="text-violet-400" />
+        <div className="p-5 pt-0">
+          <div className="sticky top-0 z-20 -mx-5 mb-4 border-b border-white/[0.06] bg-background/95 px-5 py-5 backdrop-blur-sm">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/10">
+                  <MessageSquare size={15} className="text-violet-400" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-semibold">频道管理</h2>
+                  <p className="text-[11px] text-muted-foreground">
+                    {loading ? "加载中" : `${channels.length} 个频道`}
+                  </p>
+                </div>
               </div>
-              <div>
-                <h2 className="text-sm font-semibold">频道管理</h2>
-                <p className="text-[11px] text-muted-foreground">
-                  {loading ? "加载中" : `${channels.length} 个频道`}
-                </p>
+              <div className="flex items-center gap-1.5">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void refreshAll()} disabled={loading || checkingStatus}>
+                      {loading || checkingStatus ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>刷新</TooltipContent>
+                </Tooltip>
+                <Button size="sm" variant="outline" onClick={() => void openFeishuDialog()}>
+                  <Plus size={14} /> 添加飞书
+                </Button>
               </div>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void refreshAll()} disabled={loading || checkingStatus}>
-                    {loading || checkingStatus ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>刷新</TooltipContent>
-              </Tooltip>
-              <Button size="sm" variant="outline" onClick={() => void openFeishuDialog()}>
-                <Plus size={14} /> 添加飞书
-              </Button>
             </div>
           </div>
 
+          <div className="space-y-4 pb-5">
           {error && (
             <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-300">
               {error}
@@ -1137,6 +1140,7 @@ export default function ChannelsPage() {
               })}
             </div>
           )}
+        </div>
         </div>
       </ScrollArea>
 
