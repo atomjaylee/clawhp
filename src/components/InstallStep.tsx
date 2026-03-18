@@ -26,8 +26,13 @@ interface InstallEvent {
 export default function InstallStep({ onNext, onInstalled, systemInfo, config }: InstallStepProps) {
   const alreadyInstalled = !!systemInfo?.openclaw_fully_installed;
   const isWindows = systemInfo?.os === "windows";
-  const isNpmMirrorInstall = config.installMethod === "npm_mirror";
-  const installTitle = isNpmMirrorInstall ? "npm 全局安装（国内镜像）" : "官方安装脚本";
+  const npmAvailable = Boolean(systemInfo?.npm_version);
+  const requestedInstallMethod = config.installMethod;
+  const willFallbackToOfficialScript = requestedInstallMethod === "npm_mirror" && !npmAvailable;
+  const effectiveInstallMethod = willFallbackToOfficialScript ? "official_script" : requestedInstallMethod;
+  const requestedInstallTitle = requestedInstallMethod === "npm_mirror" ? "npm 全局安装（国内镜像）" : "官方安装脚本";
+  const installTitle = effectiveInstallMethod === "npm_mirror" ? "npm 全局安装（国内镜像）" : "官方安装脚本";
+  const isEffectiveNpmMirrorInstall = effectiveInstallMethod === "npm_mirror";
 
   const [installing, setInstalling] = useState(false);
   const [enteringDashboard, setEnteringDashboard] = useState(false);
@@ -99,10 +104,16 @@ export default function InstallStep({ onNext, onInstalled, systemInfo, config }:
     setLogs([]);
     setProgress(5);
 
-    addLog("info", `安装方式: ${installTitle}`);
+    addLog("info", `请求安装方式: ${requestedInstallTitle}`);
+    if (willFallbackToOfficialScript) {
+      addLog("warn", "未检测到 npm，已自动切换为官方安装脚本（自动处理 Node.js / npm 缺失）");
+    }
+    addLog("info", `实际执行方式: ${installTitle}`);
     addLog("info", `执行: ${installCommand}`);
-    if (isNpmMirrorInstall) {
+    if (isEffectiveNpmMirrorInstall) {
       addLog("info", "npm 安装将使用 npmmirror 国内镜像，不会修改你本机全局 npm registry");
+    } else {
+      addLog("info", "官方安装脚本会自动处理 Node.js / npm 缺失环境");
     }
     if (config.apiKey) {
       addLog("info", `API 提供商: ${config.apiProvider}`);
@@ -142,10 +153,10 @@ export default function InstallStep({ onNext, onInstalled, systemInfo, config }:
   };
 
   const installCommand = isWindows
-    ? (isNpmMirrorInstall
+    ? (isEffectiveNpmMirrorInstall
       ? "npm install -g openclaw --registry=https://registry.npmmirror.com"
       : "iwr -useb https://openclaw.ai/install.ps1 | iex")
-    : (isNpmMirrorInstall
+    : (isEffectiveNpmMirrorInstall
       ? "npm install -g openclaw --registry=https://registry.npmmirror.com"
       : "curl -fsSL https://openclaw.ai/install.sh | bash");
 
@@ -154,7 +165,7 @@ export default function InstallStep({ onNext, onInstalled, systemInfo, config }:
       <div className="mb-4">
         <h2 className="text-lg font-semibold mb-1">安装 OpenClaw</h2>
         <p className="text-[13px] text-muted-foreground">
-          {isNpmMirrorInstall
+          {isEffectiveNpmMirrorInstall
             ? "通过 npm 全局安装 CLI，并使用国内镜像源完成安装；随后继续执行 onboard、daemon 安装与可用性校验"
             : "通过官方安装脚本完成 CLI 安装，并按文档执行 onboard、daemon 安装与可用性校验"}
         </p>
@@ -168,10 +179,15 @@ export default function InstallStep({ onNext, onInstalled, systemInfo, config }:
               <span className="text-[13px] font-medium">{installTitle}</span>
             </div>
             <p className="text-[11px] text-muted-foreground mb-3">
-              {isNpmMirrorInstall
+              {isEffectiveNpmMirrorInstall
                 ? "适合国内网络环境。要求本机已安装 Node.js 和 npm，安装源使用 npmmirror。"
                 : "自动检测环境、安装所需依赖（Node.js 等）、安装 CLI 并完成初始配置。"}
             </p>
+            {willFallbackToOfficialScript && (
+              <p className="text-[11px] text-amber-300 mb-3">
+                已自动兜底：你选择了 npm 国内镜像，但当前系统未检测到 npm，将改用官方脚本继续安装。
+              </p>
+            )}
             <code className="text-[11px] text-muted-foreground/70 bg-white/[0.03] px-2 py-1 rounded block font-mono">{installCommand}</code>
           </div>
         </div>

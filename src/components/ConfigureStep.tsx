@@ -55,7 +55,7 @@ export default function ConfigureStep({ onNext, config, systemInfo, onConfigChan
   const selectedProvider = PROVIDERS.find((p) => p.id === config.apiProvider) ?? PROVIDERS[0];
   const selectedInstallMethod = INSTALL_METHODS.find((method) => method.id === config.installMethod) ?? INSTALL_METHODS[0];
   const npmAvailable = Boolean(systemInfo?.npm_version);
-  const installMethodBlocked = config.installMethod === "npm_mirror" && !npmAvailable;
+  const willFallbackToOfficialScript = config.installMethod === "npm_mirror" && !npmAvailable;
   const customNeedsBaseUrl =
     config.apiProvider === "custom"
     && config.apiKey.trim().length > 0
@@ -64,7 +64,7 @@ export default function ConfigureStep({ onNext, config, systemInfo, onConfigChan
     config.apiProvider === "custom"
     && config.apiKey.trim().length > 0
     && config.customModelId.trim().length === 0;
-  const canContinue = !customNeedsBaseUrl && !customNeedsModelId && !installMethodBlocked;
+  const canContinue = !customNeedsBaseUrl && !customNeedsModelId;
 
   const update = (patch: Partial<InstallConfig>) => {
     // Reset validation when key or provider changes
@@ -140,15 +140,15 @@ export default function ConfigureStep({ onNext, config, systemInfo, onConfigChan
             </div>
 
             <div className={`mt-3 rounded-lg border px-3 py-2 text-[11px] ${
-              config.installMethod === "npm_mirror" && !npmAvailable
+              willFallbackToOfficialScript
                 ? "border-amber-500/20 bg-amber-500/5 text-amber-300"
                 : "border-white/[0.06] bg-white/[0.02] text-muted-foreground"
             }`}>
               {config.installMethod === "npm_mirror"
                 ? npmAvailable
                   ? `已检测到 npm v${systemInfo?.npm_version}，将使用 npmmirror 国内镜像执行全局安装。`
-                  : "当前未检测到 npm，国内镜像安装方式暂不可用。你可以先安装 Node.js / npm，或者切换到官方脚本。"
-                : "将使用官方在线安装脚本；如果当前网络无法访问官方源，建议改用上面的 npm 国内镜像方式。"}
+                  : "当前未检测到 npm。安装阶段会自动切换到官方脚本，自动处理 Node.js / npm 缺失问题。"
+                : "将使用官方在线安装脚本；脚本会自动处理缺失的 Node.js / npm 依赖。"}
             </div>
           </CardContent>
         </Card>
@@ -301,12 +301,12 @@ export default function ConfigureStep({ onNext, config, systemInfo, onConfigChan
 
       <div className="mt-4 flex items-center justify-between">
         <p className="text-[11px] text-muted-foreground">
-          {installMethodBlocked
-            ? "当前未检测到 npm，请先安装 Node.js / npm 或切换到官方脚本"
-            : customNeedsBaseUrl
+          {customNeedsBaseUrl
             ? "自定义 Provider 需要填写 Base URL 才能继续"
             : customNeedsModelId
             ? "自定义 Provider 需要填写模型 ID 才能完成官方 onboard"
+            : willFallbackToOfficialScript
+              ? "未检测到 npm，将自动切换官方脚本继续安装（无需手动打开命令行）"
             : config.apiKey
               ? `${selectedInstallMethod.title}已就绪，点击下一步开始安装`
               : `将使用${selectedInstallMethod.title}安装，模型配置也可以稍后再补`}

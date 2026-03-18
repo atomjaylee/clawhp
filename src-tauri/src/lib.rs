@@ -1928,9 +1928,22 @@ async fn run_install_command(
     let port = gateway_port.unwrap_or(18789);
 
     tokio::task::spawn_blocking(move || {
-        let selected_install_method = install_method
+        let requested_install_method = install_method
             .as_deref()
             .unwrap_or("npm_mirror");
+        let selected_install_method = match requested_install_method {
+            "npm_mirror" | "official_script" => requested_install_method,
+            other => {
+                let _ = app.emit("install-log", InstallEvent {
+                    level: "warn".into(),
+                    message: format!(
+                        "未知安装方式 `{}`，已回退为 npm 国内镜像安装",
+                        other
+                    ),
+                });
+                "npm_mirror"
+            }
+        };
         let existing_config_before_install = read_openclaw_config();
 
         if let Some(config_path) = get_openclaw_config_path()
@@ -1972,7 +1985,79 @@ async fn run_install_command(
             };
         }
 
-        let result = if selected_install_method == "official_script" {
+        let selected_install_label = if selected_install_method == "npm_mirror" {
+            "npm 全局安装（国内镜像）"
+        } else {
+            "官方安装脚本"
+        };
+        let _ = app.emit("install-log", InstallEvent {
+            level: "info".into(),
+            message: format!("请求安装方式: {}", selected_install_label),
+        });
+
+        let mut effective_install_method = selected_install_method.to_string();
+        let mut npm_version_for_install: Option<String> = None;
+        if selected_install_method == "npm_mirror" {
+            let npm_version_result =
+                run_cmd_owned_timeout("npm", &["--version".to_string()], Duration::from_secs(5));
+            if npm_version_result.success {
+                npm_version_for_install = Some(clean_line(&npm_version_result.stdout));
+            } else {
+                effective_install_method = "official_script".to_string();
+                let reason = if npm_version_result.stderr.trim().is_empty() {
+                    "命令不可用".to_string()
+                } else {
+                    first_meaningful_line(&npm_version_result.stderr)
+                };
+                let _ = app.emit("install-log", InstallEvent {
+                    level: "warn".into(),
+                    message: format!(
+                        "未检测到 npm（{}），将自动切换到官方安装脚本继续安装",
+                        reason
+                    ),
+                });
+            }
+        }
+
+        if effective_install_method == "official_script" {
+            let node_version_result =
+                run_cmd_owned_timeout("node", &["--version".to_string()], Duration::from_secs(5));
+            if node_version_result.success {
+                let node_version = clean_line(&node_version_result.stdout);
+                let node_major = parse_node_major(&node_version).unwrap_or(0);
+                if node_major > 0 && node_major < 22 {
+                    let _ = app.emit("install-log", InstallEvent {
+                        level: "warn".into(),
+                        message: format!(
+                            "检测到 Node.js {}（低于推荐 v22），官方脚本会按需处理依赖",
+                            node_version
+                        ),
+                    });
+                } else if !node_version.is_empty() {
+                    let _ = app.emit("install-log", InstallEvent {
+                        level: "info".into(),
+                        message: format!("检测到 Node.js {}", node_version),
+                    });
+                }
+            } else {
+                let _ = app.emit("install-log", InstallEvent {
+                    level: "info".into(),
+                    message: "未检测到 Node.js，官方脚本将自动安装并继续流程".into(),
+                });
+            }
+        }
+
+        let effective_install_label = if effective_install_method == "npm_mirror" {
+            "npm 全局安装（国内镜像）"
+        } else {
+            "官方安装脚本"
+        };
+        let _ = app.emit("install-log", InstallEvent {
+            level: "info".into(),
+            message: format!("实际执行方式: {}", effective_install_label),
+        });
+
+        let result = if effective_install_method == "official_script" {
             let script = if os_str == "windows" {
                 "set \"SHARP_IGNORE_GLOBAL_LIBVIPS=1\"&& \
                  powershell -ExecutionPolicy Bypass -NoProfile -Command \
@@ -1989,27 +2074,10 @@ async fn run_install_command(
 
             stream_script(&app, &script, &[], None)
         } else {
-            let npm_version_result = run_cmd_owned_timeout("npm", &["--version".to_string()], Duration::from_secs(5));
-            if !npm_version_result.success {
-                let _ = app.emit("install-log", InstallEvent {
-                    level: "error".into(),
-                    message: "当前未检测到 npm，无法使用国内镜像安装方式。请先安装 Node.js / npm，或切换到官方安装脚本。".into(),
-                });
-                let _ = app.emit("install-log", InstallEvent {
-                    level: "done".into(),
-                    message: "fail".into(),
-                });
-                return CommandResult {
-                    success: false,
-                    stdout: String::new(),
-                    stderr: "npm is required for npm_mirror install method".into(),
-                    code: Some(1),
-                };
-            }
-
+            let npm_version = npm_version_for_install.unwrap_or_else(|| "unknown".to_string());
             let _ = app.emit("install-log", InstallEvent {
                 level: "info".into(),
-                message: format!("使用 npm v{} 通过国内镜像安装 OpenClaw CLI...", clean_line(&npm_version_result.stdout)),
+                message: format!("使用 npm v{} 通过国内镜像安装 OpenClaw CLI...", npm_version),
             });
             let _ = app.emit("install-log", InstallEvent {
                 level: "info".into(),
