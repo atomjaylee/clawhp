@@ -15,6 +15,7 @@ import type {
   OpenClawSkillInfo,
   SkillInfo,
   SkillMarketplaceEntry,
+  SkillsRequirementSnapshot,
   SkillRequirementState,
   SkillsDashboardSnapshot,
 } from "@/types";
@@ -39,6 +40,9 @@ export default function SkillsPage() {
   const [marketLoading, setMarketLoading] = useState(false);
   const [marketError, setMarketError] = useState("");
   const [marketMessage, setMarketMessage] = useState("");
+  const [requirementsLoading, setRequirementsLoading] = useState(false);
+  const [requirementsLoaded, setRequirementsLoaded] = useState(false);
+  const [requirementWarnings, setRequirementWarnings] = useState<string[]>([]);
   const [requirementMessage, setRequirementMessage] = useState("");
   const [requirementError, setRequirementError] = useState("");
   const [installingRequirementKey, setInstallingRequirementKey] = useState<string | null>(null);
@@ -53,16 +57,71 @@ export default function SkillsPage() {
       setPageLoading(true);
     }
 
+    setRequirementError("");
+
     try {
       const nextSnapshot = await invoke<SkillsDashboardSnapshot>("get_skills_dashboard_snapshot");
       setSnapshot(nextSnapshot);
       setPageError("");
+      setRequirementWarnings([]);
+      setRequirementsLoaded(nextSnapshot.openclawSkills.length === 0);
+      return nextSnapshot;
     } catch (error) {
       setPageError(`读取 Skills 状态失败: ${error}`);
       setSnapshot(null);
+      setRequirementWarnings([]);
+      setRequirementsLoaded(false);
+      return null;
     } finally {
       setPageLoading(false);
     }
+  }
+
+  async function fetchRequirementDetails() {
+    setRequirementsLoading(true);
+    setRequirementError("");
+
+    try {
+      const payload = await invoke<SkillsRequirementSnapshot>("get_skills_requirement_snapshot");
+      setSnapshot((current) => {
+        if (!current) {
+          return current;
+        }
+
+        const mergedSkills = current.openclawSkills.map((skill) => ({
+          ...skill,
+          installHints: payload.installHintsBySkill[skill.name] ?? [],
+        }));
+
+        return {
+          ...current,
+          openclawSkills: mergedSkills,
+          summary: {
+            ...current.summary,
+            eligibleCount: payload.eligibleCount || mergedSkills.filter((skill) => skill.eligible).length,
+            missingRequirementCount:
+              payload.missingRequirementCount
+              || mergedSkills.filter((skill) => !isRequirementStateEmpty(skill.missing)).length,
+          },
+        };
+      });
+      setRequirementWarnings(payload.warnings ?? []);
+      setRequirementError("");
+      setRequirementsLoaded(true);
+    } catch (error) {
+      setRequirementWarnings([]);
+      setRequirementError(`读取依赖建议失败: ${error}`);
+    } finally {
+      setRequirementsLoading(false);
+    }
+  }
+
+  async function loadSkillsView(options?: { silent?: boolean }) {
+    const nextSnapshot = await fetchSnapshot(options);
+    if (!nextSnapshot || nextSnapshot.openclawSkills.length === 0) {
+      return;
+    }
+    void fetchRequirementDetails();
   }
 
   async function loadMarketplace(query: string) {
@@ -85,7 +144,7 @@ export default function SkillsPage() {
   }
 
   useEffect(() => {
-    void fetchSnapshot();
+    void loadSkillsView();
   }, []);
 
   useEffect(() => {
@@ -98,7 +157,7 @@ export default function SkillsPage() {
 
   async function refreshAll() {
     await Promise.all([
-      fetchSnapshot({ silent: false }),
+      loadSkillsView({ silent: false }),
       loadMarketplace(marketQuery),
     ]);
   }
@@ -127,7 +186,7 @@ export default function SkillsPage() {
       }
 
       setMarketMessage(`已从 ${installSourceLabel} 安装 ${trimmedSlug}`);
-      await fetchSnapshot({ silent: true });
+      await loadSkillsView({ silent: true });
       await loadMarketplace(marketQuery);
     } catch (error) {
       setMarketError(`安装 ${trimmedSlug} 失败: ${error}`);
@@ -152,7 +211,7 @@ export default function SkillsPage() {
       }
 
       setPendingDelete(null);
-      await fetchSnapshot({ silent: true });
+      await loadSkillsView({ silent: true });
       await loadMarketplace(marketQuery);
     } catch (error) {
       setDeleteError(`删除 ${pendingDelete.name} 失败: ${error}`);
@@ -179,7 +238,7 @@ export default function SkillsPage() {
       }
 
       setRequirementMessage(result.stdout.trim() || `已执行 ${hintLabel}`);
-      await fetchSnapshot({ silent: true });
+      await loadSkillsView({ silent: true });
     } catch (error) {
       setRequirementError(`安装 ${hintLabel} 失败: ${error}`);
     } finally {
@@ -193,6 +252,7 @@ export default function SkillsPage() {
   const workspaceSkills = openclawSkills.filter((skill) => skill.source === "openclaw-workspace");
   const readyBundledCount = bundledSkills.filter((skill) => skill.eligible).length;
   const missingBundledCount = bundledSkills.filter((skill) => !skill.eligible).length;
+  const warningMessages = [...(snapshot?.warnings ?? []), ...requirementWarnings];
   const managedSkillNames = new Set(managedSkills.map((skill) => skill.originSlug || skill.name));
   const openclawSkillNames = new Set(openclawSkills.map((skill) => skill.name));
   const filteredBundledSkills = bundledSkills.filter((skill) => {
@@ -238,6 +298,8 @@ export default function SkillsPage() {
                 <p className="text-[12px] text-muted-foreground">
                   {pageLoading && !snapshot
                     ? "正在读取本地与 OpenClaw Skills 状态"
+                    : requirementsLoading && snapshot
+                      ? `${managedSkills.length} 个额外安装，${openclawSkills.length} 个 OpenClaw 可用 Skills，依赖建议补充中`
                     : `${managedSkills.length} 个额外安装，${openclawSkills.length} 个 OpenClaw 可用 Skills`}
                 </p>
               </div>
@@ -246,8 +308,14 @@ export default function SkillsPage() {
             <div className="flex flex-wrap items-center gap-1.5">
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => void refreshAll()} disabled={pageLoading || marketLoading}>
-                    {(pageLoading || marketLoading) ? <Loader2 className="animate-spin" /> : <RefreshCw size={14} />}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={() => void refreshAll()}
+                    disabled={pageLoading || marketLoading || requirementsLoading}
+                  >
+                    {(pageLoading || marketLoading || requirementsLoading) ? <Loader2 className="animate-spin" /> : <RefreshCw size={14} />}
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>刷新 Skills 列表与市场</TooltipContent>
@@ -292,7 +360,7 @@ export default function SkillsPage() {
                 icon={Wrench}
                 title="待补依赖"
                 value={snapshot?.summary.missingRequirementCount ?? 0}
-                hint="需要额外 CLI、环境变量或频道配置"
+                hint={requirementsLoading && !requirementsLoaded ? "正在后台补充安装建议" : "需要额外 CLI、环境变量或频道配置"}
                 tone="rose"
               />
             </div>
@@ -303,9 +371,9 @@ export default function SkillsPage() {
               </NoticeCard>
             )}
 
-            {snapshot?.warnings?.length ? (
+            {warningMessages.length ? (
               <NoticeCard title="部分数据未完全加载" tone="amber">
-                {snapshot.warnings.join("；")}
+                {warningMessages.join("；")}
               </NoticeCard>
             ) : null}
 
@@ -371,6 +439,7 @@ export default function SkillsPage() {
                     <AvailableSkillCard
                       key={`${skill.source}:${skill.name}`}
                       skill={skill}
+                      requirementDetailsLoading={requirementsLoading && !requirementsLoaded}
                       installingRequirementKey={installingRequirementKey}
                       onInstallRequirement={(hintId, hintLabel) => void handleInstallRequirement(skill, hintId, hintLabel)}
                     />
@@ -628,6 +697,7 @@ export default function SkillsPage() {
                         <AvailableSkillCard
                           key={`${skill.source}:${skill.name}`}
                           skill={skill}
+                          requirementDetailsLoading={requirementsLoading && !requirementsLoaded}
                           installingRequirementKey={installingRequirementKey}
                           onInstallRequirement={(hintId, hintLabel) => void handleInstallRequirement(skill, hintId, hintLabel)}
                         />
@@ -865,10 +935,12 @@ function InstalledSkillCard({
 
 function AvailableSkillCard({
   skill,
+  requirementDetailsLoading,
   installingRequirementKey,
   onInstallRequirement,
 }: {
   skill: OpenClawSkillInfo;
+  requirementDetailsLoading: boolean;
   installingRequirementKey: string | null;
   onInstallRequirement: (hintId: string, hintLabel: string) => void;
 }) {
@@ -921,6 +993,12 @@ function AvailableSkillCard({
               </Badge>
             ))}
           </div>
+        ) : null}
+
+        {!skill.eligible && skill.installHints.length === 0 && requirementDetailsLoading ? (
+          <p className="text-[11px] text-muted-foreground">
+            正在补充安装建议...
+          </p>
         ) : null}
 
         {actionableInstallHints.length > 0 ? (
@@ -1001,6 +1079,14 @@ function collectRequirementTags(missing: SkillRequirementState) {
 
 function canInstallHintDirectly(kind: string) {
   return ["brew", "go", "node", "uv", "download"].includes(kind.trim().toLowerCase());
+}
+
+function isRequirementStateEmpty(missing: SkillRequirementState) {
+  return missing.bins.length === 0
+    && missing.anyBins.length === 0
+    && missing.env.length === 0
+    && missing.config.length === 0
+    && missing.os.length === 0;
 }
 
 function formatRelativeTime(value?: number | null) {

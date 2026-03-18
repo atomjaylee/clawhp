@@ -3101,6 +3101,17 @@ pub struct SkillsDashboardSnapshot {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsRequirementSnapshot {
+    pub eligible_count: usize,
+    pub missing_requirement_count: usize,
+    #[serde(default)]
+    pub install_hints_by_skill: BTreeMap<String, Vec<SkillInstallHint>>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillMarketplaceEntry {
@@ -4827,33 +4838,11 @@ fn build_skills_dashboard_snapshot() -> SkillsDashboardSnapshot {
     .map_err(|error| warnings.push(error))
     .ok();
 
-    let check_args = vec![
-        "skills".to_string(),
-        "check".to_string(),
-        "--json".to_string(),
-    ];
-    let check_payload = parse_command_json::<OpenClawSkillsCheckResponse>(
-        run_openclaw_args_timeout(&check_args, Duration::from_secs(20)),
-        "检查 OpenClaw skills 依赖失败",
-    )
-    .map_err(|error| warnings.push(error))
-    .ok();
-
     let managed_map = managed_skills
         .iter()
         .cloned()
         .map(|skill| (skill.name.clone(), skill))
         .collect::<BTreeMap<_, _>>();
-    let install_hints = check_payload
-        .as_ref()
-        .map(|payload| {
-            payload
-                .missing_requirements
-                .iter()
-                .map(|entry| (entry.name.clone(), entry.install.clone()))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
 
     let mut openclaw_skills = list_payload
         .as_ref()
@@ -4874,7 +4863,7 @@ fn build_skills_dashboard_snapshot() -> SkillsDashboardSnapshot {
                         bundled: entry.bundled,
                         homepage: entry.homepage.clone(),
                         missing: entry.missing.clone(),
-                        install_hints: install_hints.get(&entry.name).cloned().unwrap_or_default(),
+                        install_hints: Vec::new(),
                         managed_installed: managed_skill.is_some(),
                         managed_version: managed_skill.and_then(|skill| {
                             skill.installed_version.clone().or_else(|| {
@@ -4916,26 +4905,52 @@ fn build_skills_dashboard_snapshot() -> SkillsDashboardSnapshot {
                 .iter()
                 .filter(|skill| skill.source == "openclaw-workspace")
                 .count(),
-            eligible_count: check_payload
-                .as_ref()
-                .map(|payload| payload.summary.eligible)
-                .unwrap_or_else(|| {
-                    openclaw_skills
-                        .iter()
-                        .filter(|skill| skill.eligible)
-                        .count()
-                }),
-            missing_requirement_count: check_payload
-                .as_ref()
-                .map(|payload| payload.summary.missing_requirements)
-                .unwrap_or_else(|| {
-                    openclaw_skills
-                        .iter()
-                        .filter(|skill| !skill.missing.is_empty())
-                        .count()
-                }),
+            eligible_count: openclaw_skills.iter().filter(|skill| skill.eligible).count(),
+            missing_requirement_count: openclaw_skills
+                .iter()
+                .filter(|skill| !skill.missing.is_empty())
+                .count(),
         },
         openclaw_skills,
+        warnings,
+    }
+}
+
+fn build_skills_requirement_snapshot() -> SkillsRequirementSnapshot {
+    let mut warnings = Vec::new();
+    let check_args = vec![
+        "skills".to_string(),
+        "check".to_string(),
+        "--json".to_string(),
+    ];
+    let check_payload = parse_command_json::<OpenClawSkillsCheckResponse>(
+        run_openclaw_args_timeout(&check_args, Duration::from_secs(20)),
+        "检查 OpenClaw skills 依赖失败",
+    )
+    .map_err(|error| warnings.push(error))
+    .ok();
+
+    let install_hints_by_skill = check_payload
+        .as_ref()
+        .map(|payload| {
+            payload
+                .missing_requirements
+                .iter()
+                .map(|entry| (entry.name.clone(), entry.install.clone()))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    SkillsRequirementSnapshot {
+        eligible_count: check_payload
+            .as_ref()
+            .map(|payload| payload.summary.eligible)
+            .unwrap_or(0),
+        missing_requirement_count: check_payload
+            .as_ref()
+            .map(|payload| payload.summary.missing_requirements)
+            .unwrap_or(0),
+        install_hints_by_skill,
         warnings,
     }
 }
@@ -4948,6 +4963,13 @@ fn list_skills() -> Vec<SkillInfo> {
 #[tauri::command]
 async fn get_skills_dashboard_snapshot() -> Result<SkillsDashboardSnapshot, String> {
     tokio::task::spawn_blocking(build_skills_dashboard_snapshot)
+        .await
+        .map_err(|error| format!("Task panic: {}", error))
+}
+
+#[tauri::command]
+async fn get_skills_requirement_snapshot() -> Result<SkillsRequirementSnapshot, String> {
+    tokio::task::spawn_blocking(build_skills_requirement_snapshot)
         .await
         .map_err(|error| format!("Task panic: {}", error))
 }
@@ -9711,6 +9733,7 @@ pub fn run() {
             install_default_skills,
             list_skills,
             get_skills_dashboard_snapshot,
+            get_skills_requirement_snapshot,
             search_skill_marketplace,
             install_skill_from_marketplace,
             install_skill_requirement,

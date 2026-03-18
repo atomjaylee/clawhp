@@ -113,6 +113,13 @@ export interface SkillsDashboardSnapshot {
   warnings: string[];
 }
 
+export interface SkillsRequirementSnapshot {
+  eligibleCount: number;
+  missingRequirementCount: number;
+  installHintsBySkill: Record<string, SkillInstallHint[]>;
+  warnings: string[];
+}
+
 export interface SkillMarketplaceEntry {
   slug: string;
   displayName: string;
