@@ -33,7 +33,7 @@ interface AppSidebarProps {
   wizardStep?: WizardStep;
   onWizardNavigate?: (step: WizardStep) => void;
   completedSteps?: Set<WizardStep>;
-  version?: string;
+  appVersion?: string;
 }
 
 const dashboardNav: { id: DashboardTab; label: string; icon: LucideIcon }[] = [
@@ -54,7 +54,7 @@ const wizardNav: { id: WizardStep; label: string; icon: LucideIcon }[] = [
 
 export function AppSidebar({
   mode, activeTab, onTabChange, wizardStep, onWizardNavigate,
-  completedSteps, version,
+  completedSteps, appVersion,
 }: AppSidebarProps) {
   const currentWizardIdx = wizardNav.findIndex((s) => s.id === wizardStep);
 
@@ -138,7 +138,7 @@ export function AppSidebar({
         <SidebarMenu>
           <SidebarMenuItem>
             <div className="px-2 py-1.5 text-xs text-muted-foreground">
-              {version ?? "OpenClaw"} · v1.0.0
+              OpenClaw Installer · v{appVersion ?? "未知"}
             </div>
           </SidebarMenuItem>
         </SidebarMenu>

@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import appPackage from "../package.json";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 import { Breadcrumb, BreadcrumbItem, BreadcrumbList, BreadcrumbPage } from "@/components/ui/breadcrumb";
@@ -147,7 +148,7 @@ export default function App() {
           wizardStep={wizardStep}
           onWizardNavigate={handleWizardNavigate}
           completedSteps={completedSteps}
-          version={systemInfo?.openclaw_version ?? undefined}
+          appVersion={appPackage.version}
         />
         <SidebarInset className="min-h-0 overflow-hidden">
           <div className="h-6 shrink-0 border-b border-white/[0.05] bg-background/90" data-tauri-drag-region />
