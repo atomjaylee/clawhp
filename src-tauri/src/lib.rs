@@ -3350,7 +3350,10 @@ fn binding_display_from_match(match_value: &serde_json::Value) -> Option<String>
         parts.push(account_id.to_string());
     }
 
-    if let Some(peer) = binding_match.get("peer").and_then(|value| value.as_object()) {
+    if let Some(peer) = binding_match
+        .get("peer")
+        .and_then(|value| value.as_object())
+    {
         let peer_kind = peer
             .get("kind")
             .and_then(|value| value.as_str())
@@ -3595,13 +3598,7 @@ fn verify_created_agent(
 
                 if !config_has_entry {
                     let _ = ensure_agent_config_entry(
-                        agent_id,
-                        None,
-                        None,
-                        workspace,
-                        agent_dir,
-                        model,
-                        bindings,
+                        agent_id, None, None, workspace, agent_dir, model, bindings,
                     );
 
                     if let Some(config_after_sync) = read_openclaw_config() {
@@ -3833,11 +3830,8 @@ fn list_agents_from_cli(config: Option<&serde_json::Value>) -> Result<Vec<AgentI
                 .map(agent_bindings_from_config)
                 .unwrap_or_default();
             let cli_bindings = agent_bindings_from_routes(&item);
-            let merged = merge_agent_binding_lists(&[
-                config_bindings,
-                legacy_bindings,
-                cli_bindings,
-            ]);
+            let merged =
+                merge_agent_binding_lists(&[config_bindings, legacy_bindings, cli_bindings]);
             if merged.is_empty() {
                 agent_bindings_from_routes(&item)
             } else {
@@ -3946,7 +3940,7 @@ fn ensure_allowed_agent_workspace_file(file_name: &str) -> Result<&'static str, 
         .ok_or_else(|| format!("不支持编辑文件 '{}'", file_name))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 struct SkillOriginRecord {
     registry: Option<String>,
@@ -4005,51 +3999,49 @@ struct OpenClawSkillMissingRequirementRecord {
 struct SkillMarketplacePreset {
     id: &'static str,
     label: &'static str,
-    site_url: &'static str,
-    registry_url: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SkillMarketplaceSearchResponse {
+struct TencentSkillHubResponse {
+    code: i32,
     #[serde(default)]
-    results: Vec<SkillMarketplaceSearchRecord>,
+    data: TencentSkillHubPayload,
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TencentSkillHubPayload {
+    #[serde(default)]
+    skills: Vec<TencentSkillHubSkillRecord>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SkillMarketplaceSearchRecord {
+struct TencentSkillHubSkillRecord {
     slug: Option<String>,
-    display_name: Option<String>,
-    summary: Option<String>,
+    name: Option<String>,
+    description: Option<String>,
+    description_zh: Option<String>,
     version: Option<String>,
-    updated_at: Option<i64>,
+    updated_at: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SkillMarketplaceListResponse {
-    #[serde(default)]
-    items: Vec<SkillMarketplaceListRecord>,
-}
+const TENCENT_SKILLHUB_SITE_URL: &str = "https://skillhub.tencent.com";
+const TENCENT_SKILLHUB_API_LIST_URL: &str = "https://lightmake.site/api/skills";
+const TENCENT_SKILLHUB_API_TOP_URL: &str = "https://lightmake.site/api/skills/top";
+const TENCENT_SKILLHUB_INDEX_URL: &str =
+    "https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/skills.json";
+const TENCENT_SKILLHUB_INSTALL_SCRIPT_URL: &str =
+    "https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/install.sh";
+const TENCENT_SKILLHUB_PRIMARY_DOWNLOAD_URL_TEMPLATE: &str =
+    "https://lightmake.site/api/v1/download?slug={slug}";
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SkillMarketplaceListRecord {
-    slug: String,
-    display_name: String,
-    summary: Option<String>,
-    updated_at: i64,
-    latest_version: Option<SkillMarketplaceVersionRecord>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SkillMarketplaceVersionRecord {
-    version: String,
-}
-
-fn parse_command_json<T: DeserializeOwned>(result: CommandResult, label: &str) -> Result<T, String> {
+fn parse_command_json<T: DeserializeOwned>(
+    result: CommandResult,
+    label: &str,
+) -> Result<T, String> {
     if !result.success {
         let detail = if result.stderr.trim().is_empty() {
             result.stdout.trim().to_string()
@@ -4104,7 +4096,9 @@ fn collect_managed_skills() -> Vec<SkillInfo> {
                         if let Some(value) = json.get("version").and_then(|value| value.as_str()) {
                             version = value.to_string();
                         }
-                        if let Some(value) = json.get("description").and_then(|value| value.as_str()) {
+                        if let Some(value) =
+                            json.get("description").and_then(|value| value.as_str())
+                        {
                             description = value.to_string();
                         }
                     }
@@ -4158,21 +4152,20 @@ fn collect_managed_skills() -> Vec<SkillInfo> {
     skills
 }
 
-fn resolve_skill_marketplace_preset(source: Option<&str>) -> Result<SkillMarketplacePreset, String> {
-    match source.unwrap_or("clawhub").trim().to_ascii_lowercase().as_str() {
-        "" | "clawhub" | "official" => Ok(SkillMarketplacePreset {
-            id: "clawhub",
-            label: "ClawHub 官方",
-            site_url: "https://clawhub.ai",
-            registry_url: "https://clawhub.ai",
-        }),
+fn resolve_skill_marketplace_preset(
+    source: Option<&str>,
+) -> Result<SkillMarketplacePreset, String> {
+    match source
+        .unwrap_or("tencent")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "tencent" | "skillhub" | "skillhub-tencent" => Ok(SkillMarketplacePreset {
             id: "tencent",
             label: "腾讯 SkillHub",
-            site_url: "https://skillhub.tencent.com",
-            registry_url: "https://skillhub.tencent.com",
         }),
-        other => Err(format!("不支持的 Skills 市场来源: {}", other)),
+        other => Err(format!("当前版本仅支持腾讯 SkillHub，收到来源: {}", other)),
     }
 }
 
@@ -4180,46 +4173,150 @@ fn clamp_skill_marketplace_limit(limit: Option<u32>, fallback: u32) -> u32 {
     limit.unwrap_or(fallback).clamp(1, 24)
 }
 
-async fn discover_skill_marketplace_registry(site_url: &str) -> Option<String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(6))
-        .build()
-        .ok()?;
-    let base = Url::parse(site_url).ok()?;
+fn parse_timestamp_value(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| text.trim().parse::<i64>().ok())
+        })
+}
 
-    for path in ["/.well-known/clawhub.json", "/.well-known/clawdhub.json"] {
-        let Ok(url) = base.join(path) else {
-            continue;
-        };
-        let Ok(response) = client
-            .get(url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-        else {
-            continue;
-        };
+fn tencent_skillhub_summary(record: &TencentSkillHubSkillRecord) -> String {
+    record
+        .description_zh
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            record
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_default()
+        .to_string()
+}
 
-        if !response.status().is_success() {
-            continue;
-        }
+fn parse_tencent_skillhub_entries(
+    payload: &str,
+    preset: SkillMarketplacePreset,
+    limit: usize,
+) -> Result<Vec<SkillMarketplaceEntry>, String> {
+    let parsed = serde_json::from_str::<TencentSkillHubResponse>(payload)
+        .map_err(|error| format!("解析 {} 数据失败: {}", preset.label, error))?;
 
-        let Ok(payload) = response.json::<serde_json::Value>().await else {
-            continue;
-        };
-        let api_base = payload
-            .get("apiBase")
-            .and_then(|value| value.as_str())
-            .or_else(|| payload.get("registry").and_then(|value| value.as_str()))
+    if parsed.code != 0 {
+        let message = parsed
+            .message
+            .as_deref()
             .map(str::trim)
-            .filter(|value| !value.is_empty());
-
-        if let Some(value) = api_base {
-            return Some(value.to_string());
-        }
+            .filter(|value| !value.is_empty())
+            .unwrap_or("未知错误");
+        return Err(format!("{} 返回异常: {}", preset.label, message));
     }
 
-    None
+    let mut entries = parsed
+        .data
+        .skills
+        .into_iter()
+        .filter_map(|record| {
+            let slug = record
+                .slug
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())?;
+            let display_name = record
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&slug)
+                .to_string();
+
+            Some(SkillMarketplaceEntry {
+                slug,
+                display_name,
+                summary: tencent_skillhub_summary(&record),
+                version: record
+                    .version
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.to_string()),
+                updated_at: record.updated_at.as_ref().and_then(parse_timestamp_value),
+                marketplace: preset.id.to_string(),
+                marketplace_label: preset.label.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    entries.truncate(limit);
+    Ok(entries)
+}
+
+fn write_skill_origin_record(
+    entry_dir: &Path,
+    registry: &str,
+    slug: &str,
+    installed_version: Option<&str>,
+) -> Result<(), String> {
+    let origin_dir = entry_dir.join(".clawhub");
+    std::fs::create_dir_all(&origin_dir)
+        .map_err(|error| format!("写入 Skill 来源信息失败: {}", error))?;
+
+    let record = SkillOriginRecord {
+        registry: Some(registry.to_string()),
+        slug: Some(slug.to_string()),
+        installed_version: installed_version
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string()),
+    };
+    let payload = serde_json::to_string_pretty(&record)
+        .map_err(|error| format!("序列化 Skill 来源信息失败: {}", error))?;
+    std::fs::write(origin_dir.join("origin.json"), format!("{}\n", payload))
+        .map_err(|error| format!("写入 Skill 来源信息失败: {}", error))
+}
+
+fn ensure_tencent_skillhub_cli() -> Result<(), String> {
+    refresh_path();
+    if command_exists("skillhub") {
+        return Ok(());
+    }
+
+    let install_script = format!(
+        "curl -fsSL {} | bash -s -- --cli-only --no-skills",
+        TENCENT_SKILLHUB_INSTALL_SCRIPT_URL
+    );
+    let install_result = run_cmd_owned_timeout(
+        "bash",
+        &["-lc".to_string(), install_script],
+        Duration::from_secs(240),
+    );
+    if !install_result.success {
+        let detail = if install_result.stderr.trim().is_empty() {
+            install_result.stdout.trim().to_string()
+        } else {
+            install_result.stderr.trim().to_string()
+        };
+        return Err(if detail.is_empty() {
+            "安装腾讯 SkillHub CLI 失败".to_string()
+        } else {
+            format!("安装腾讯 SkillHub CLI 失败: {}", detail)
+        });
+    }
+
+    refresh_path();
+    if command_exists("skillhub") {
+        Ok(())
+    } else {
+        Err("腾讯 SkillHub CLI 安装完成，但当前环境仍未找到 `skillhub` 命令".to_string())
+    }
 }
 
 fn build_skills_dashboard_snapshot() -> SkillsDashboardSnapshot {
@@ -4290,9 +4387,9 @@ fn build_skills_dashboard_snapshot() -> SkillsDashboardSnapshot {
                         install_hints: install_hints.get(&entry.name).cloned().unwrap_or_default(),
                         managed_installed: managed_skill.is_some(),
                         managed_version: managed_skill.and_then(|skill| {
-                            skill.installed_version
-                                .clone()
-                                .or_else(|| (skill.version != "unknown").then(|| skill.version.clone()))
+                            skill.installed_version.clone().or_else(|| {
+                                (skill.version != "unknown").then(|| skill.version.clone())
+                            })
                         }),
                         managed_path: managed_skill.map(|skill| skill.path.clone()),
                     }
@@ -4332,11 +4429,21 @@ fn build_skills_dashboard_snapshot() -> SkillsDashboardSnapshot {
             eligible_count: check_payload
                 .as_ref()
                 .map(|payload| payload.summary.eligible)
-                .unwrap_or_else(|| openclaw_skills.iter().filter(|skill| skill.eligible).count()),
+                .unwrap_or_else(|| {
+                    openclaw_skills
+                        .iter()
+                        .filter(|skill| skill.eligible)
+                        .count()
+                }),
             missing_requirement_count: check_payload
                 .as_ref()
                 .map(|payload| payload.summary.missing_requirements)
-                .unwrap_or_else(|| openclaw_skills.iter().filter(|skill| !skill.missing.is_empty()).count()),
+                .unwrap_or_else(|| {
+                    openclaw_skills
+                        .iter()
+                        .filter(|skill| !skill.missing.is_empty())
+                        .count()
+                }),
         },
         openclaw_skills,
         warnings,
@@ -4362,9 +4469,6 @@ async fn search_skill_marketplace(
     limit: Option<u32>,
 ) -> Result<Vec<SkillMarketplaceEntry>, String> {
     let preset = resolve_skill_marketplace_preset(source.as_deref())?;
-    let registry_base = discover_skill_marketplace_registry(preset.site_url)
-        .await
-        .unwrap_or_else(|| preset.registry_url.to_string());
     let bounded_limit = clamp_skill_marketplace_limit(limit, 12);
     let client = Client::builder()
         .timeout(Duration::from_secs(12))
@@ -4377,19 +4481,20 @@ async fn search_skill_marketplace(
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string());
 
-    let mut url = if trimmed_query.is_some() {
-        Url::parse(&format!("{}/api/v1/search", registry_base.trim_end_matches('/')))
-            .map_err(|error| format!("构建 Skills 搜索地址失败: {}", error))?
+    let url = if let Some(keyword) = trimmed_query.as_deref() {
+        let mut url = Url::parse(TENCENT_SKILLHUB_API_LIST_URL)
+            .map_err(|error| format!("构建 Skills 搜索地址失败: {}", error))?;
+        url.query_pairs_mut()
+            .append_pair("page", "1")
+            .append_pair("pageSize", &bounded_limit.to_string())
+            .append_pair("sortBy", "score")
+            .append_pair("order", "desc")
+            .append_pair("keyword", keyword);
+        url
     } else {
-        Url::parse(&format!("{}/api/v1/skills", registry_base.trim_end_matches('/')))
+        Url::parse(TENCENT_SKILLHUB_API_TOP_URL)
             .map_err(|error| format!("构建 Skills 市场地址失败: {}", error))?
     };
-
-    url.query_pairs_mut()
-        .append_pair("limit", &bounded_limit.to_string());
-    if let Some(value) = trimmed_query.as_deref() {
-        url.query_pairs_mut().append_pair("q", value);
-    }
 
     let response = client
         .get(url)
@@ -4411,43 +4516,7 @@ async fn search_skill_marketplace(
         });
     }
 
-    if trimmed_query.is_some() {
-        let parsed = serde_json::from_str::<SkillMarketplaceSearchResponse>(&payload)
-            .map_err(|error| format!("解析 {} 搜索结果失败: {}", preset.label, error))?;
-        Ok(parsed
-            .results
-            .into_iter()
-            .filter_map(|entry| {
-                let slug = entry.slug?;
-                let display_name = entry.display_name.unwrap_or_else(|| slug.clone());
-                Some(SkillMarketplaceEntry {
-                    slug,
-                    display_name,
-                    summary: entry.summary.unwrap_or_default(),
-                    version: entry.version,
-                    updated_at: entry.updated_at,
-                    marketplace: preset.id.to_string(),
-                    marketplace_label: preset.label.to_string(),
-                })
-            })
-            .collect())
-    } else {
-        let parsed = serde_json::from_str::<SkillMarketplaceListResponse>(&payload)
-            .map_err(|error| format!("解析 {} 列表失败: {}", preset.label, error))?;
-        Ok(parsed
-            .items
-            .into_iter()
-            .map(|entry| SkillMarketplaceEntry {
-                slug: entry.slug,
-                display_name: entry.display_name,
-                summary: entry.summary.unwrap_or_default(),
-                version: entry.latest_version.map(|value| value.version),
-                updated_at: Some(entry.updated_at),
-                marketplace: preset.id.to_string(),
-                marketplace_label: preset.label.to_string(),
-            })
-            .collect())
-    }
+    parse_tencent_skillhub_entries(&payload, preset, bounded_limit as usize)
 }
 
 #[tauri::command]
@@ -4457,20 +4526,14 @@ async fn install_skill_from_marketplace(
     version: Option<String>,
     force: Option<bool>,
 ) -> CommandResult {
-    let preset = match resolve_skill_marketplace_preset(source.as_deref()) {
-        Ok(value) => value,
-        Err(error) => {
-            return CommandResult {
-                success: false,
-                stdout: String::new(),
-                stderr: error,
-                code: Some(1),
-            }
-        }
-    };
-    let registry_url = discover_skill_marketplace_registry(preset.site_url)
-        .await
-        .unwrap_or_else(|| preset.registry_url.to_string());
+    if let Err(error) = resolve_skill_marketplace_preset(source.as_deref()) {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: error,
+            code: Some(1),
+        };
+    }
 
     tokio::task::spawn_blocking(move || {
         let trimmed_slug = slug.trim().to_string();
@@ -4487,8 +4550,13 @@ async fn install_skill_from_marketplace(
             };
         }
 
-        let openclaw_home = get_openclaw_home();
-        if let Err(error) = std::fs::create_dir_all(Path::new(&openclaw_home).join("skills")) {
+        let requested_version = version
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        let skills_dir = PathBuf::from(get_openclaw_home()).join("skills");
+        if let Err(error) = std::fs::create_dir_all(&skills_dir) {
             return CommandResult {
                 success: false,
                 stdout: String::new(),
@@ -4497,33 +4565,51 @@ async fn install_skill_from_marketplace(
             };
         }
 
+        if let Err(error) = ensure_tencent_skillhub_cli() {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            };
+        }
+
         let mut args = vec![
-            "--workdir".to_string(),
-            openclaw_home,
             "--dir".to_string(),
-            "skills".to_string(),
-            "--site".to_string(),
-            preset.site_url.to_string(),
-            "--registry".to_string(),
-            registry_url,
-            "--no-input".to_string(),
+            skills_dir.to_string_lossy().to_string(),
+            "--index".to_string(),
+            TENCENT_SKILLHUB_INDEX_URL.to_string(),
+            "--skip-self-upgrade".to_string(),
             "install".to_string(),
-            trimmed_slug,
+            trimmed_slug.clone(),
+            "--primary-download-url-template".to_string(),
+            TENCENT_SKILLHUB_PRIMARY_DOWNLOAD_URL_TEMPLATE.to_string(),
         ];
 
-        if let Some(value) = version
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            args.push("--version".to_string());
-            args.push(value.to_string());
-        }
         if force.unwrap_or(false) {
             args.push("--force".to_string());
         }
 
-        run_cmd_owned_timeout("clawhub", &args, Duration::from_secs(180))
+        let result = run_cmd_owned_timeout("skillhub", &args, Duration::from_secs(180));
+        if !result.success {
+            return result;
+        }
+
+        let skill_dir = skills_dir.join(&trimmed_slug);
+        match write_skill_origin_record(
+            &skill_dir,
+            TENCENT_SKILLHUB_SITE_URL,
+            &trimmed_slug,
+            requested_version.as_deref(),
+        ) {
+            Ok(()) => result,
+            Err(error) => CommandResult {
+                success: true,
+                stdout: format!("{}\nwarn: {}", result.stdout, error),
+                stderr: String::new(),
+                code: Some(0),
+            },
+        }
     })
     .await
     .unwrap_or_else(|error| CommandResult {
@@ -4813,24 +4899,22 @@ async fn create_agent(
             }
         };
 
-        let preset_files_written = match apply_agent_workspace_overrides(
-            &created_workspace,
-            workspace_files.as_ref(),
-        ) {
-            Ok(result) => result,
-            Err(error) => {
-                return CommandResult {
-                    success: false,
-                    stdout: format!(
-                        "Agent '{}' 已创建，但预设写入失败：{}",
-                        created_agent_id,
-                        created_workspace.display(),
-                    ),
-                    stderr: error,
-                    code: Some(1),
-                };
-            }
-        };
+        let preset_files_written =
+            match apply_agent_workspace_overrides(&created_workspace, workspace_files.as_ref()) {
+                Ok(result) => result,
+                Err(error) => {
+                    return CommandResult {
+                        success: false,
+                        stdout: format!(
+                            "Agent '{}' 已创建，但预设写入失败：{}",
+                            created_agent_id,
+                            created_workspace.display(),
+                        ),
+                        stderr: error,
+                        code: Some(1),
+                    };
+                }
+            };
 
         if let Err(error) = ensure_agent_config_entry(
             &created_agent_id,
@@ -6364,7 +6448,10 @@ fn feishu_route_binding_from_value(
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string());
 
-    if let Some(peer) = binding_match.get("peer").and_then(|value| value.as_object()) {
+    if let Some(peer) = binding_match
+        .get("peer")
+        .and_then(|value| value.as_object())
+    {
         let scope = peer
             .get("kind")
             .and_then(|value| value.as_str())
@@ -6462,7 +6549,10 @@ fn remove_feishu_route_bindings_from_config(
     config: &mut serde_json::Value,
     removed_account_id: Option<&str>,
 ) {
-    let Some(bindings) = config.get_mut("bindings").and_then(|value| value.as_array_mut()) else {
+    let Some(bindings) = config
+        .get_mut("bindings")
+        .and_then(|value| value.as_array_mut())
+    else {
         return;
     };
 
@@ -6696,7 +6786,9 @@ fn read_feishu_account_binding_map(config: &serde_json::Value) -> BTreeMap<Strin
             .map(|value| value.to_string())
             .unwrap_or_else(|| default_account_id.clone());
 
-        mapping.entry(account_id).or_insert_with(|| agent_id.to_string());
+        mapping
+            .entry(account_id)
+            .or_insert_with(|| agent_id.to_string());
     }
 
     mapping
@@ -6774,7 +6866,10 @@ fn collect_feishu_account_binding_catalog(
 }
 
 fn prune_feishu_complex_bindings(config: &mut serde_json::Value) {
-    let Some(bindings) = config.get_mut("bindings").and_then(|value| value.as_array_mut()) else {
+    let Some(bindings) = config
+        .get_mut("bindings")
+        .and_then(|value| value.as_array_mut())
+    else {
         return;
     };
 
@@ -6834,10 +6929,14 @@ fn upsert_feishu_account_binding(
             ));
         }
     }
-    if let Some((existing_account_id, _)) = binding_map.iter().find(|(existing_account_id, existing_agent_id)| {
-        normalize_agent_id_key(existing_agent_id) == normalize_agent_id_key(clean_agent_id)
-            && existing_account_id.as_str() != clean_account_id
-    }) {
+    if let Some((existing_account_id, _)) =
+        binding_map
+            .iter()
+            .find(|(existing_account_id, existing_agent_id)| {
+                normalize_agent_id_key(existing_agent_id) == normalize_agent_id_key(clean_agent_id)
+                    && existing_account_id.as_str() != clean_account_id
+            })
+    {
         return Err(format!(
             "Agent {} 已绑定飞书频道 {}，请先解绑后再重新绑定",
             clean_agent_id, existing_account_id
@@ -6849,7 +6948,10 @@ fn upsert_feishu_account_binding(
     }
 
     let default_account_id = read_feishu_default_account_id(config);
-    if let Some(bindings) = config.get_mut("bindings").and_then(|value| value.as_array_mut()) {
+    if let Some(bindings) = config
+        .get_mut("bindings")
+        .and_then(|value| value.as_array_mut())
+    {
         bindings.retain(|binding| {
             if !is_feishu_route_binding(binding) {
                 return true;
@@ -6864,9 +6966,7 @@ fn upsert_feishu_account_binding(
             }
 
             let binding_match = binding.get("match").and_then(|value| value.as_object());
-            let has_peer = binding_match
-                .and_then(|value| value.get("peer"))
-                .is_some();
+            let has_peer = binding_match.and_then(|value| value.get("peer")).is_some();
             let bound_account_id = binding_match
                 .and_then(|value| value.get("accountId"))
                 .and_then(|value| value.as_str())
@@ -6919,10 +7019,14 @@ fn save_feishu_account_credentials(
 
     config["channels"]["feishu"]["accounts"][account_id]["enabled"] = serde_json::json!(enabled);
     config["channels"]["feishu"]["accounts"][account_id]["appId"] = serde_json::json!(app_id);
-    config["channels"]["feishu"]["accounts"][account_id]["appSecret"] = serde_json::json!(app_secret);
+    config["channels"]["feishu"]["accounts"][account_id]["appSecret"] =
+        serde_json::json!(app_secret);
     config["channels"]["feishu"]["accounts"][account_id]["domain"] = serde_json::json!(domain);
 
-    if let Some(name) = display_name.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(name) = display_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         config["channels"]["feishu"]["accounts"][account_id]["name"] = serde_json::json!(name);
         config["channels"]["feishu"]["accounts"][account_id]["botName"] = serde_json::json!(name);
     }
@@ -6986,16 +7090,17 @@ fn unbind_feishu_channel_account_internal(account_id: &str) -> Result<(), String
     prune_feishu_complex_bindings(&mut config);
     let default_account_id = read_feishu_default_account_id(&config);
 
-    if let Some(bindings) = config.get_mut("bindings").and_then(|value| value.as_array_mut()) {
+    if let Some(bindings) = config
+        .get_mut("bindings")
+        .and_then(|value| value.as_array_mut())
+    {
         bindings.retain(|binding| {
             if !is_feishu_route_binding(binding) {
                 return true;
             }
 
             let binding_match = binding.get("match").and_then(|value| value.as_object());
-            let has_peer = binding_match
-                .and_then(|value| value.get("peer"))
-                .is_some();
+            let has_peer = binding_match.and_then(|value| value.get("peer")).is_some();
             let bound_account_id = binding_match
                 .and_then(|value| value.get("accountId"))
                 .and_then(|value| value.as_str())
@@ -7019,7 +7124,8 @@ fn unbind_feishu_channel_account_internal(account_id: &str) -> Result<(), String
         .and_then(|value| value.as_object())
         .is_some()
     {
-        config["channels"]["feishu"]["accounts"][account_id.trim()]["enabled"] = serde_json::json!(false);
+        config["channels"]["feishu"]["accounts"][account_id.trim()]["enabled"] =
+            serde_json::json!(false);
     }
 
     write_openclaw_config(&config)
@@ -7437,7 +7543,10 @@ fn save_feishu_multi_agent_bindings(routes: Vec<FeishuRouteBindingPayload>) -> C
 
     remove_feishu_route_bindings_from_config(&mut config, None);
 
-    if let Some(bindings) = config.get_mut("bindings").and_then(|value| value.as_array_mut()) {
+    if let Some(bindings) = config
+        .get_mut("bindings")
+        .and_then(|value| value.as_array_mut())
+    {
         bindings.extend(rebuilt_routes);
     }
 

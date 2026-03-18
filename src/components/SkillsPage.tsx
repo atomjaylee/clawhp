@@ -19,34 +19,19 @@ import type {
   SkillsDashboardSnapshot,
 } from "@/types";
 
-type MarketplaceSourceId = "clawhub" | "tencent";
-type AvailableFilter = "all" | "ready" | "needs-setup" | "workspace";
+type BundledFilter = "all" | "ready" | "needs-setup";
 
-const MARKETPLACE_SOURCES: Array<{
-  id: MarketplaceSourceId;
-  label: string;
-  description: string;
-  url: string;
-}> = [
-  {
-    id: "clawhub",
-    label: "ClawHub 官方",
-    description: "官方 Skills 市场，适合通用扩展安装。",
-    url: "https://clawhub.ai",
-  },
-  {
-    id: "tencent",
-    label: "腾讯 SkillHub",
-    description: "面向国内网络环境的第三方 Skills 市场接入。",
-    url: "https://skillhub.tencent.com",
-  },
-];
+const TENCENT_MARKETPLACE = {
+  id: "tencent",
+  label: "腾讯 SkillHub",
+  description: "只保留腾讯 SkillHub 市场，空白时显示推荐 Skills，搜索时直接走腾讯官方前台正在使用的接口。",
+  url: "https://skillhub.tencent.com",
+} as const;
 
 export default function SkillsPage() {
   const [snapshot, setSnapshot] = useState<SkillsDashboardSnapshot | null>(null);
   const [pageLoading, setPageLoading] = useState(true);
   const [pageError, setPageError] = useState("");
-  const [marketSource, setMarketSource] = useState<MarketplaceSourceId>("clawhub");
   const [marketQuery, setMarketQuery] = useState("");
   const [marketItems, setMarketItems] = useState<SkillMarketplaceEntry[]>([]);
   const [marketLoading, setMarketLoading] = useState(false);
@@ -56,7 +41,7 @@ export default function SkillsPage() {
   const [pendingDelete, setPendingDelete] = useState<SkillInfo | null>(null);
   const [deleteError, setDeleteError] = useState("");
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [availableFilter, setAvailableFilter] = useState<AvailableFilter>("all");
+  const [bundledFilter, setBundledFilter] = useState<BundledFilter>("all");
 
   async function fetchSnapshot(options?: { silent?: boolean }) {
     if (!options?.silent) {
@@ -75,13 +60,13 @@ export default function SkillsPage() {
     }
   }
 
-  async function loadMarketplace(sourceId: MarketplaceSourceId, query: string) {
+  async function loadMarketplace(query: string) {
     setMarketLoading(true);
     setMarketError("");
 
     try {
       const result = await invoke<SkillMarketplaceEntry[]>("search_skill_marketplace", {
-        source: sourceId,
+        source: TENCENT_MARKETPLACE.id,
         query: query.trim() ? query.trim() : null,
         limit: query.trim() ? 10 : 12,
       });
@@ -100,16 +85,16 @@ export default function SkillsPage() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void loadMarketplace(marketSource, marketQuery);
+      void loadMarketplace(marketQuery);
     }, marketQuery.trim() ? 220 : 0);
 
     return () => window.clearTimeout(timer);
-  }, [marketQuery, marketSource]);
+  }, [marketQuery]);
 
   async function refreshAll() {
     await Promise.all([
       fetchSnapshot({ silent: false }),
-      loadMarketplace(marketSource, marketQuery),
+      loadMarketplace(marketQuery),
     ]);
   }
 
@@ -119,14 +104,14 @@ export default function SkillsPage() {
       return;
     }
 
-    const installSourceLabel = currentMarketSource.label;
+    const installSourceLabel = TENCENT_MARKETPLACE.label;
     setInstallingSlug(trimmedSlug);
     setMarketError("");
     setMarketMessage("");
 
     try {
       const result: CommandResult = await invoke("install_skill_from_marketplace", {
-        source: marketSource,
+        source: TENCENT_MARKETPLACE.id,
         slug: trimmedSlug,
         force: false,
       });
@@ -138,7 +123,7 @@ export default function SkillsPage() {
 
       setMarketMessage(`已从 ${installSourceLabel} 安装 ${trimmedSlug}`);
       await fetchSnapshot({ silent: true });
-      await loadMarketplace(marketSource, marketQuery);
+      await loadMarketplace(marketQuery);
     } catch (error) {
       setMarketError(`安装 ${trimmedSlug} 失败: ${error}`);
     } finally {
@@ -163,7 +148,7 @@ export default function SkillsPage() {
 
       setPendingDelete(null);
       await fetchSnapshot({ silent: true });
-      await loadMarketplace(marketSource, marketQuery);
+      await loadMarketplace(marketQuery);
     } catch (error) {
       setDeleteError(`删除 ${pendingDelete.name} 失败: ${error}`);
     } finally {
@@ -173,18 +158,16 @@ export default function SkillsPage() {
 
   const managedSkills = snapshot?.managedSkills ?? [];
   const openclawSkills = snapshot?.openclawSkills ?? [];
+  const bundledSkills = openclawSkills.filter((skill) => skill.source === "openclaw-bundled");
+  const workspaceSkills = openclawSkills.filter((skill) => skill.source === "openclaw-workspace");
   const managedSkillNames = new Set(managedSkills.map((skill) => skill.originSlug || skill.name));
   const openclawSkillNames = new Set(openclawSkills.map((skill) => skill.name));
-  const currentMarketSource = MARKETPLACE_SOURCES.find((item) => item.id === marketSource) || MARKETPLACE_SOURCES[0];
-  const filteredOpenClawSkills = openclawSkills.filter((skill) => {
-    if (availableFilter === "ready") {
+  const filteredBundledSkills = bundledSkills.filter((skill) => {
+    if (bundledFilter === "ready") {
       return skill.eligible;
     }
-    if (availableFilter === "needs-setup") {
+    if (bundledFilter === "needs-setup") {
       return !skill.eligible;
-    }
-    if (availableFilter === "workspace") {
-      return skill.source === "openclaw-workspace";
     }
     return true;
   });
@@ -245,14 +228,14 @@ export default function SkillsPage() {
               />
               <SummaryCard
                 icon={Sparkles}
-                title="Bundled Skills"
+                title="自带 Skills"
                 value={snapshot?.summary.bundledCount ?? 0}
                 hint="OpenClaw 自带，无需再装"
                 tone="amber"
               />
               <SummaryCard
                 icon={FolderOpen}
-                title="Workspace Skills"
+                title="工作区 Skills"
                 value={snapshot?.summary.workspaceCount ?? 0}
                 hint="来自工作区透出的能力"
                 tone="cyan"
@@ -278,45 +261,79 @@ export default function SkillsPage() {
               </NoticeCard>
             ) : null}
 
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+              <SectionHeader
+                title="OpenClaw 自带 Skills"
+                description="像 1password、github 这类默认 Skill 都在这里，先看这里，不需要再去市场重复安装。"
+              />
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { id: "all", label: "全部" },
+                  { id: "ready", label: "可直接用" },
+                  { id: "needs-setup", label: "待补依赖" },
+                ].map((filter) => (
+                  <button
+                    key={filter.id}
+                    type="button"
+                    className={`rounded-full border px-3 py-1.5 text-[12px] transition-colors ${
+                      bundledFilter === filter.id
+                        ? "border-cyan-400/40 bg-cyan-500/12 text-cyan-100"
+                        : "border-white/[0.08] bg-white/[0.03] text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+                    }`}
+                    onClick={() => setBundledFilter(filter.id as BundledFilter)}
+                  >
+                    {filter.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {filteredBundledSkills.length === 0 ? (
+              <Card className="border-dashed border-white/[0.08] bg-white/[0.02]">
+                <CardContent className="py-10 text-center text-[12px] text-muted-foreground">
+                  当前筛选条件下没有匹配的 OpenClaw 自带 Skills。
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+                {filteredBundledSkills.map((skill) => (
+                  <AvailableSkillCard key={`${skill.source}:${skill.name}`} skill={skill} />
+                ))}
+              </div>
+            )}
+
+            {workspaceSkills.length > 0 ? (
+              <>
+                <SectionHeader
+                  title="工作区 Skills"
+                  description={`这些是当前工作区透出的自定义 Skills。工作区目录：${snapshot?.workspaceDir || "~/.openclaw/workspace"}`}
+                />
+                <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+                  {workspaceSkills.map((skill) => (
+                    <AvailableSkillCard key={`${skill.source}:${skill.name}`} skill={skill} />
+                  ))}
+                </div>
+              </>
+            ) : null}
+
             <Card className="overflow-hidden border-white/[0.08] bg-[radial-gradient(circle_at_top_left,rgba(20,184,166,0.12),transparent_40%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))]">
               <CardContent className="space-y-4 p-4">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
                       <Blocks size={15} className="text-teal-300" />
-                      <h3 className="text-[14px] font-semibold">市场安装</h3>
+                      <h3 className="text-[14px] font-semibold">腾讯 SkillHub 安装</h3>
                     </div>
                     <p className="text-[12px] text-muted-foreground">
-                      搜索并安装第三方 Skills。OpenClaw 自带和 workspace skills 会单独展示，不需要再从市场重复安装。
+                      这里只接腾讯 SkillHub。空白时展示推荐 Skills，输入关键词后直接搜索腾讯市场。
                     </p>
                   </div>
                   <Button size="sm" variant="outline" asChild>
-                    <a href={currentMarketSource.url} target="_blank" rel="noreferrer">
+                    <a href={TENCENT_MARKETPLACE.url} target="_blank" rel="noreferrer">
                       <ExternalLink />
-                      打开 {currentMarketSource.label}
+                      打开 {TENCENT_MARKETPLACE.label}
                     </a>
                   </Button>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  {MARKETPLACE_SOURCES.map((source) => (
-                    <button
-                      key={source.id}
-                      type="button"
-                      className={`rounded-full border px-3 py-1.5 text-[12px] transition-colors ${
-                        source.id === marketSource
-                          ? "border-teal-400/40 bg-teal-500/12 text-teal-100"
-                          : "border-white/[0.08] bg-white/[0.03] text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
-                      }`}
-                      onClick={() => {
-                        setMarketSource(source.id);
-                        setMarketError("");
-                        setMarketMessage("");
-                      }}
-                    >
-                      {source.label}
-                    </button>
-                  ))}
                 </div>
 
                 <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
@@ -330,11 +347,11 @@ export default function SkillsPage() {
                         id="skill-market-search"
                         value={marketQuery}
                         onChange={(event) => setMarketQuery(event.target.value)}
-                        placeholder="例如 tencentcloud-asr、github、语音识别"
+                        placeholder="例如 weather、one-password、语音识别"
                         className="h-10 border-white/[0.08] bg-black/20 pl-9"
                       />
                     </div>
-                    <p className="text-[11px] text-muted-foreground">{currentMarketSource.description}</p>
+                    <p className="text-[11px] text-muted-foreground">{TENCENT_MARKETPLACE.description}</p>
                   </div>
 
                   <div className="flex items-end">
@@ -371,7 +388,9 @@ export default function SkillsPage() {
                   <div className="rounded-2xl border border-dashed border-white/[0.08] bg-black/10 p-6 text-center">
                     <p className="text-[13px] font-medium">没有找到可展示的 Skills</p>
                     <p className="mt-1 text-[12px] text-muted-foreground">
-                      试试换一个关键词，或者直接输入准确 slug 安装。
+                      {marketQuery.trim()
+                        ? "试试换一个关键词，或者直接输入准确 slug 安装。"
+                        : "腾讯 SkillHub 暂时没有返回推荐 Skills，可以直接输入 slug 安装。"}
                     </p>
                   </div>
                 ) : (
@@ -389,7 +408,7 @@ export default function SkillsPage() {
                                 <div className="flex items-center gap-2">
                                   <p className="truncate text-[13px] font-semibold">{item.displayName}</p>
                                   <Badge className="border-0 bg-white/[0.06] px-1.5 py-0 text-[10px] text-muted-foreground">
-                                    {item.marketplaceLabel}
+                                    腾讯 SkillHub
                                   </Badge>
                                 </div>
                                 <p className="font-mono text-[11px] text-muted-foreground">{item.slug}{item.version ? ` · v${item.version}` : ""}</p>
@@ -409,7 +428,7 @@ export default function SkillsPage() {
                             </p>
 
                             <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-                              <span>来源：{item.marketplaceLabel}</span>
+                              <span>来源：腾讯 SkillHub</span>
                               <span>{formatRelativeTime(item.updatedAt)}</span>
                             </div>
                           </CardContent>
@@ -422,7 +441,7 @@ export default function SkillsPage() {
             </Card>
 
             <SectionHeader
-              title="已安装 Skills"
+              title="已额外安装 Skills"
               description={`这些目录位于 ${snapshot?.managedSkillsDir || "~/.openclaw/skills"}，可以删除后重新安装。`}
             />
 
@@ -450,48 +469,6 @@ export default function SkillsPage() {
                       setPendingDelete(skill);
                     }}
                   />
-                ))}
-              </div>
-            )}
-
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-              <SectionHeader
-                title="OpenClaw 可用 Skills"
-                description={`这里会把 OpenClaw bundled skills 和 workspace skills 一起透出来。当前 workspace 目录：${snapshot?.workspaceDir || "~/.openclaw/workspace"}`}
-              />
-              <div className="flex flex-wrap gap-2">
-                {[
-                  { id: "all", label: "全部" },
-                  { id: "ready", label: "可直接用" },
-                  { id: "needs-setup", label: "待补依赖" },
-                  { id: "workspace", label: "工作区" },
-                ].map((filter) => (
-                  <button
-                    key={filter.id}
-                    type="button"
-                    className={`rounded-full border px-3 py-1.5 text-[12px] transition-colors ${
-                      availableFilter === filter.id
-                        ? "border-cyan-400/40 bg-cyan-500/12 text-cyan-100"
-                        : "border-white/[0.08] bg-white/[0.03] text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
-                    }`}
-                    onClick={() => setAvailableFilter(filter.id as AvailableFilter)}
-                  >
-                    {filter.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {filteredOpenClawSkills.length === 0 ? (
-              <Card className="border-dashed border-white/[0.08] bg-white/[0.02]">
-                <CardContent className="py-10 text-center text-[12px] text-muted-foreground">
-                  当前筛选条件下没有匹配的 Skills。
-                </CardContent>
-              </Card>
-            ) : (
-              <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
-                {filteredOpenClawSkills.map((skill) => (
-                  <AvailableSkillCard key={`${skill.source}:${skill.name}`} skill={skill} />
                 ))}
               </div>
             )}
@@ -762,7 +739,7 @@ function resolveManagedSkillSource(skill: SkillInfo) {
   if (!skill.originRegistry) {
     return "手动安装";
   }
-  if (skill.originRegistry.includes("skillhub.tencent.com")) {
+  if (skill.originRegistry.includes("skillhub.tencent.com") || skill.originRegistry.includes("lightmake.site")) {
     return "腾讯 SkillHub";
   }
   if (skill.originRegistry.includes("clawhub")) {
@@ -773,10 +750,10 @@ function resolveManagedSkillSource(skill: SkillInfo) {
 
 function resolveOpenClawSourceLabel(source: string) {
   if (source === "openclaw-bundled") {
-    return "Bundled";
+    return "OpenClaw 自带";
   }
   if (source === "openclaw-workspace") {
-    return "Workspace";
+    return "工作区";
   }
   return source;
 }
