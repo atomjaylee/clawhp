@@ -106,8 +106,14 @@ fn append_known_path_entries(base_path: String) -> String {
         if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
             extras.insert(PathBuf::from(localappdata).join("pnpm"));
         }
-    } else if let Some(prefix_dir) = installer_npm_prefix_dir() {
-        extras.insert(prefix_dir.join("bin"));
+    } else {
+        let home = get_user_home_dir();
+        extras.insert(home.join(".local/bin"));
+        extras.insert(home.join("go/bin"));
+
+        if let Some(prefix_dir) = installer_npm_prefix_dir() {
+            extras.insert(prefix_dir.join("bin"));
+        }
     }
 
     for extra in extras {
@@ -4033,6 +4039,40 @@ struct TencentSkillHubSkillRecord {
     updated_at: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SkillMarkdownMetadataRecord {
+    openclaw: Option<SkillMarkdownOpenClawMetadataRecord>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SkillMarkdownOpenClawMetadataRecord {
+    #[serde(default)]
+    install: Vec<SkillInstallRecipe>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct SkillInstallRecipe {
+    id: String,
+    kind: String,
+    label: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    bins: Vec<String>,
+    formula: Option<String>,
+    package: Option<String>,
+    module: Option<String>,
+    url: Option<String>,
+    archive: Option<String>,
+    extract: Option<bool>,
+    strip_components: Option<u32>,
+    target_dir: Option<String>,
+    #[serde(default)]
+    os: Vec<String>,
+}
+
 const TENCENT_SKILLHUB_SITE_URL: &str = "https://skillhub.tencent.com";
 const TENCENT_SKILLHUB_API_LIST_URL: &str = "https://lightmake.site/api/skills";
 const TENCENT_SKILLHUB_API_TOP_URL: &str = "https://lightmake.site/api/skills/top";
@@ -4042,6 +4082,449 @@ const TENCENT_SKILLHUB_INSTALL_SCRIPT_URL: &str =
     "https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/install.sh";
 const TENCENT_SKILLHUB_PRIMARY_DOWNLOAD_URL_TEMPLATE: &str =
     "https://lightmake.site/api/v1/download?slug={slug}";
+
+fn current_openclaw_os_tag() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "windows") {
+        "win32"
+    } else {
+        "linux"
+    }
+}
+
+fn strip_json_like_trailing_commas(input: &str) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in chars.iter().enumerate() {
+        if in_string {
+            output.push(*ch);
+            if escaped {
+                escaped = false;
+            } else if *ch == '\\' {
+                escaped = true;
+            } else if *ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                output.push(*ch);
+            }
+            ',' => {
+                let mut lookahead = index + 1;
+                while lookahead < chars.len() && chars[lookahead].is_whitespace() {
+                    lookahead += 1;
+                }
+                if lookahead < chars.len() && matches!(chars[lookahead], '}' | ']') {
+                    continue;
+                }
+                output.push(*ch);
+            }
+            _ => output.push(*ch),
+        }
+    }
+
+    output
+}
+
+fn extract_braced_json_after_marker(content: &str, marker: &str) -> Option<String> {
+    let marker_index = content.find(marker)?;
+    let after_marker = &content[marker_index + marker.len()..];
+    let brace_index = after_marker.find('{')?;
+    let slice = &after_marker[brace_index..];
+
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, ch) in slice.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(slice[..=index].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn parse_skill_install_recipes_from_markdown(
+    skill_path: &Path,
+) -> Result<Vec<SkillInstallRecipe>, String> {
+    let content = std::fs::read_to_string(skill_path)
+        .map_err(|error| format!("无法读取 {}: {}", skill_path.display(), error))?;
+    let raw_metadata = extract_braced_json_after_marker(&content, "metadata:")
+        .ok_or_else(|| format!("{} 内没有可解析的 metadata", skill_path.display()))?;
+    let normalized = strip_json_like_trailing_commas(&raw_metadata);
+    let metadata = serde_json::from_str::<SkillMarkdownMetadataRecord>(&normalized)
+        .map_err(|error| format!("解析 {} metadata 失败: {}", skill_path.display(), error))?;
+
+    Ok(metadata
+        .openclaw
+        .map(|record| record.install)
+        .unwrap_or_default())
+}
+
+fn find_openclaw_package_root_from_path(path: &Path) -> Option<PathBuf> {
+    let candidate = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    for ancestor in candidate.ancestors() {
+        if ancestor.join("skills").is_dir()
+            && (ancestor.join("package.json").is_file() || ancestor.join("openclaw.mjs").is_file())
+        {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+fn resolve_openclaw_package_root() -> Option<PathBuf> {
+    if let Some(path) = resolve_openclaw_binary_path() {
+        if let Some(root) = find_openclaw_package_root_from_path(&path) {
+            return Some(root);
+        }
+    }
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+
+    collect_openclaw_install_paths(&home)
+        .into_iter()
+        .find(|path| {
+            path.is_dir()
+                && path.join("skills").is_dir()
+                && (path.join("package.json").is_file() || path.join("openclaw.mjs").is_file())
+        })
+}
+
+fn resolve_skill_markdown_candidates(skill_name: &str, source: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let normalized_source = source.trim();
+
+    if normalized_source.is_empty() || normalized_source == "openclaw-bundled" {
+        if let Some(package_root) = resolve_openclaw_package_root() {
+            candidates.push(
+                package_root
+                    .join("skills")
+                    .join(skill_name)
+                    .join("SKILL.md"),
+            );
+        }
+    }
+
+    if normalized_source.is_empty() || normalized_source == "openclaw-workspace" {
+        candidates.push(
+            PathBuf::from(get_openclaw_home())
+                .join("workspace")
+                .join("skills")
+                .join(skill_name)
+                .join("SKILL.md"),
+        );
+    }
+
+    let mut seen = BTreeSet::new();
+    candidates
+        .into_iter()
+        .filter(|path| seen.insert(path.to_string_lossy().to_string()))
+        .collect()
+}
+
+fn load_skill_install_recipe(
+    skill_name: &str,
+    source: &str,
+    install_id: &str,
+) -> Result<SkillInstallRecipe, String> {
+    let mut parse_errors = Vec::new();
+    let os_tag = current_openclaw_os_tag();
+
+    for candidate in resolve_skill_markdown_candidates(skill_name, source) {
+        if !candidate.is_file() {
+            continue;
+        }
+
+        match parse_skill_install_recipes_from_markdown(&candidate) {
+            Ok(recipes) => {
+                if let Some(recipe) = recipes
+                    .into_iter()
+                    .filter(|recipe| {
+                        recipe.os.is_empty() || recipe.os.iter().any(|value| value == os_tag)
+                    })
+                    .find(|recipe| recipe.id == install_id)
+                {
+                    return Ok(recipe);
+                }
+            }
+            Err(error) => parse_errors.push(error),
+        }
+    }
+
+    if !parse_errors.is_empty() {
+        return Err(parse_errors.join("；"));
+    }
+
+    Err(format!(
+        "没有找到 Skill '{}' 的安装信息 '{}'",
+        skill_name, install_id
+    ))
+}
+
+fn invalid_skill_install_input(message: &str) -> CommandResult {
+    CommandResult {
+        success: false,
+        stdout: String::new(),
+        stderr: message.to_string(),
+        code: Some(1),
+    }
+}
+
+fn detect_download_filename(url: &str, fallback_name: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|value| {
+            value
+                .path_segments()
+                .and_then(|segments| segments.last().map(|segment| segment.to_string()))
+        })
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| fallback_name.to_string())
+}
+
+fn install_skill_download_recipe(skill_name: &str, recipe: &SkillInstallRecipe) -> CommandResult {
+    let Some(url) = recipe
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return invalid_skill_install_input("下载型依赖缺少 url");
+    };
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let temp_root = std::env::temp_dir().join(format!(
+        "openclaw-skill-download-{}-{}",
+        skill_name, timestamp
+    ));
+    if let Err(error) = std::fs::create_dir_all(&temp_root) {
+        return invalid_skill_install_input(&format!("无法创建临时目录: {}", error));
+    }
+
+    let download_name = detect_download_filename(url, &format!("{}.download", recipe.id));
+    let downloaded_file = temp_root.join(download_name);
+    let curl_result = run_cmd_owned_timeout(
+        "curl",
+        &[
+            "-L".to_string(),
+            "--fail".to_string(),
+            "--output".to_string(),
+            downloaded_file.to_string_lossy().to_string(),
+            url.to_string(),
+        ],
+        Duration::from_secs(300),
+    );
+    if !curl_result.success {
+        let _ = std::fs::remove_dir_all(&temp_root);
+        return curl_result;
+    }
+
+    let target_subdir = recipe
+        .target_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("downloads");
+    let target_root = PathBuf::from(get_openclaw_home())
+        .join("tools")
+        .join(skill_name)
+        .join(target_subdir);
+    if let Err(error) = std::fs::create_dir_all(&target_root) {
+        let _ = std::fs::remove_dir_all(&temp_root);
+        return invalid_skill_install_input(&format!("无法创建目标目录: {}", error));
+    }
+
+    let mut result = if recipe.extract.unwrap_or(false) {
+        let archive_name = recipe
+            .archive
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if archive_name.contains("zip") {
+            if recipe.strip_components.unwrap_or(0) > 0 {
+                let _ = std::fs::remove_dir_all(&temp_root);
+                return invalid_skill_install_input("zip 解压暂不支持 stripComponents");
+            }
+            run_cmd_owned_timeout(
+                "unzip",
+                &[
+                    "-o".to_string(),
+                    downloaded_file.to_string_lossy().to_string(),
+                    "-d".to_string(),
+                    target_root.to_string_lossy().to_string(),
+                ],
+                Duration::from_secs(300),
+            )
+        } else {
+            let mut args = if archive_name.contains("tar.bz2")
+                || archive_name.contains("tbz2")
+                || archive_name.contains("tar.xz")
+                || archive_name.contains("txz")
+                || archive_name.contains("tar.gz")
+                || archive_name.contains("tgz")
+            {
+                let mode = if archive_name.contains("tar.bz2") || archive_name.contains("tbz2") {
+                    "-xjf"
+                } else if archive_name.contains("tar.xz") || archive_name.contains("txz") {
+                    "-xJf"
+                } else {
+                    "-xzf"
+                };
+                vec![
+                    mode.to_string(),
+                    downloaded_file.to_string_lossy().to_string(),
+                    "-C".to_string(),
+                    target_root.to_string_lossy().to_string(),
+                ]
+            } else {
+                let _ = std::fs::remove_dir_all(&temp_root);
+                return invalid_skill_install_input("暂不支持这种下载归档格式");
+            };
+
+            if let Some(components) = recipe.strip_components {
+                args.push("--strip-components".to_string());
+                args.push(components.to_string());
+            }
+
+            run_cmd_owned_timeout("tar", &args, Duration::from_secs(300))
+        }
+    } else {
+        let destination = target_root.join(
+            downloaded_file
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("download.bin"),
+        );
+        match std::fs::copy(&downloaded_file, &destination) {
+            Ok(_) => CommandResult {
+                success: true,
+                stdout: format!("已下载到 {}", destination.display()),
+                stderr: String::new(),
+                code: Some(0),
+            },
+            Err(error) => invalid_skill_install_input(&format!("写入下载文件失败: {}", error)),
+        }
+    };
+
+    let _ = std::fs::remove_dir_all(&temp_root);
+    if result.success && result.stdout.trim().is_empty() {
+        result.stdout = format!("已安装 {}", recipe.label);
+    }
+    result
+}
+
+fn execute_skill_install_recipe(skill_name: &str, recipe: &SkillInstallRecipe) -> CommandResult {
+    let kind = recipe.kind.trim().to_ascii_lowercase();
+    let result = match kind.as_str() {
+        "brew" => {
+            let Some(formula) = recipe
+                .formula
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return invalid_skill_install_input("brew 安装缺少 formula");
+            };
+            let mut args = vec!["install".to_string()];
+            if recipe.id.contains("cask") || recipe.label.to_ascii_lowercase().contains("cask") {
+                args.push("--cask".to_string());
+            }
+            args.push(formula.to_string());
+            run_cmd_owned_timeout("brew", &args, Duration::from_secs(300))
+        }
+        "go" => {
+            let Some(module) = recipe
+                .module
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return invalid_skill_install_input("go 安装缺少 module");
+            };
+            run_cmd_owned_timeout(
+                "go",
+                &["install".to_string(), module.to_string()],
+                Duration::from_secs(300),
+            )
+        }
+        "node" => {
+            let Some(package) = recipe
+                .package
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return invalid_skill_install_input("node 安装缺少 package");
+            };
+            run_cmd_owned_timeout(
+                "npm",
+                &["install".to_string(), "-g".to_string(), package.to_string()],
+                Duration::from_secs(300),
+            )
+        }
+        "uv" => {
+            let Some(package) = recipe
+                .package
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return invalid_skill_install_input("uv 安装缺少 package");
+            };
+            run_cmd_owned_timeout(
+                "uv",
+                &[
+                    "tool".to_string(),
+                    "install".to_string(),
+                    "--force".to_string(),
+                    package.to_string(),
+                ],
+                Duration::from_secs(300),
+            )
+        }
+        "download" => install_skill_download_recipe(skill_name, recipe),
+        _ => invalid_skill_install_input(&format!("暂不支持 {} 类型的一键安装", recipe.kind)),
+    };
+
+    if result.success {
+        refresh_path();
+    }
+    result
+}
 
 fn parse_command_json<T: DeserializeOwned>(
     result: CommandResult,
@@ -4617,6 +5100,49 @@ async fn install_skill_from_marketplace(
                 code: Some(0),
             },
         }
+    })
+    .await
+    .unwrap_or_else(|error| CommandResult {
+        success: false,
+        stdout: String::new(),
+        stderr: format!("Task panic: {}", error),
+        code: None,
+    })
+}
+
+#[tauri::command]
+async fn install_skill_requirement(
+    skill_name: String,
+    source: String,
+    hint_id: String,
+) -> CommandResult {
+    tokio::task::spawn_blocking(move || {
+        let normalized_skill_name = skill_name.trim().to_string();
+        let normalized_source = source.trim().to_string();
+        let normalized_hint_id = hint_id.trim().to_string();
+
+        if normalized_skill_name.is_empty()
+            || normalized_skill_name.contains('/')
+            || normalized_skill_name.contains('\\')
+            || normalized_skill_name.contains("..")
+        {
+            return invalid_skill_install_input("请输入合法的 Skill 名称");
+        }
+
+        if normalized_hint_id.is_empty() {
+            return invalid_skill_install_input("缺少依赖安装提示 ID");
+        }
+
+        let recipe = match load_skill_install_recipe(
+            &normalized_skill_name,
+            &normalized_source,
+            &normalized_hint_id,
+        ) {
+            Ok(recipe) => recipe,
+            Err(error) => return invalid_skill_install_input(&error),
+        };
+
+        execute_skill_install_recipe(&normalized_skill_name, &recipe)
     })
     .await
     .unwrap_or_else(|error| CommandResult {
@@ -9187,6 +9713,7 @@ pub fn run() {
             get_skills_dashboard_snapshot,
             search_skill_marketplace,
             install_skill_from_marketplace,
+            install_skill_requirement,
             delete_skill,
             list_agents,
             create_agent,
