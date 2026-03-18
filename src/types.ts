@@ -59,6 +59,68 @@ export interface SkillInfo {
   description: string;
   path: string;
   enabled: boolean;
+  originRegistry?: string | null;
+  originSlug?: string | null;
+  installedVersion?: string | null;
+}
+
+export interface SkillRequirementState {
+  bins: string[];
+  anyBins: string[];
+  env: string[];
+  config: string[];
+  os: string[];
+}
+
+export interface SkillInstallHint {
+  id: string;
+  kind: string;
+  label: string;
+  bins: string[];
+}
+
+export interface OpenClawSkillInfo {
+  name: string;
+  description: string;
+  emoji?: string | null;
+  eligible: boolean;
+  disabled: boolean;
+  blockedByAllowlist: boolean;
+  source: string;
+  bundled: boolean;
+  homepage?: string | null;
+  missing: SkillRequirementState;
+  installHints: SkillInstallHint[];
+  managedInstalled: boolean;
+  managedVersion?: string | null;
+  managedPath?: string | null;
+}
+
+export interface SkillsDashboardSummary {
+  managedCount: number;
+  bundledCount: number;
+  workspaceCount: number;
+  eligibleCount: number;
+  missingRequirementCount: number;
+}
+
+export interface SkillsDashboardSnapshot {
+  workspaceDir: string;
+  managedSkillsDir: string;
+  managedSkills: SkillInfo[];
+  openclawSkills: OpenClawSkillInfo[];
+  summary: SkillsDashboardSummary;
+  warnings: string[];
+}
+
+export interface SkillMarketplaceEntry {
+  slug: string;
+  displayName: string;
+  summary: string;
+  version?: string | null;
+  updatedAt?: number | null;
+  marketplace: string;
+  marketplaceLabel: string;
 }
 
 export interface AgentInfo {

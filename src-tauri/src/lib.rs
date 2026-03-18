@@ -1,5 +1,5 @@
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use reqwest::{Client, Url};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
@@ -3005,13 +3005,106 @@ fn remove_path_if_exists(path: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SkillInfo {
     pub name: String,
     pub version: String,
     pub description: String,
     pub path: String,
     pub enabled: bool,
+    #[serde(rename = "originRegistry", skip_serializing_if = "Option::is_none")]
+    pub origin_registry: Option<String>,
+    #[serde(rename = "originSlug", skip_serializing_if = "Option::is_none")]
+    pub origin_slug: Option<String>,
+    #[serde(rename = "installedVersion", skip_serializing_if = "Option::is_none")]
+    pub installed_version: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillRequirementState {
+    #[serde(default)]
+    pub bins: Vec<String>,
+    #[serde(default)]
+    pub any_bins: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub config: Vec<String>,
+    #[serde(default)]
+    pub os: Vec<String>,
+}
+
+impl SkillRequirementState {
+    fn is_empty(&self) -> bool {
+        self.bins.is_empty()
+            && self.any_bins.is_empty()
+            && self.env.is_empty()
+            && self.config.is_empty()
+            && self.os.is_empty()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct SkillInstallHint {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    #[serde(default)]
+    pub bins: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenClawSkillInfo {
+    pub name: String,
+    pub description: String,
+    pub emoji: Option<String>,
+    pub eligible: bool,
+    pub disabled: bool,
+    pub blocked_by_allowlist: bool,
+    pub source: String,
+    pub bundled: bool,
+    pub homepage: Option<String>,
+    pub missing: SkillRequirementState,
+    pub install_hints: Vec<SkillInstallHint>,
+    pub managed_installed: bool,
+    pub managed_version: Option<String>,
+    pub managed_path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsDashboardSummary {
+    pub managed_count: usize,
+    pub bundled_count: usize,
+    pub workspace_count: usize,
+    pub eligible_count: usize,
+    pub missing_requirement_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsDashboardSnapshot {
+    pub workspace_dir: String,
+    pub managed_skills_dir: String,
+    pub managed_skills: Vec<SkillInfo>,
+    pub openclaw_skills: Vec<OpenClawSkillInfo>,
+    pub summary: SkillsDashboardSummary,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillMarketplaceEntry {
+    pub slug: String,
+    pub display_name: String,
+    pub summary: String,
+    pub version: Option<String>,
+    pub updated_at: Option<i64>,
+    pub marketplace: String,
+    pub marketplace_label: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3853,10 +3946,140 @@ fn ensure_allowed_agent_workspace_file(file_name: &str) -> Result<&'static str, 
         .ok_or_else(|| format!("不支持编辑文件 '{}'", file_name))
 }
 
-#[tauri::command]
-fn list_skills() -> Vec<SkillInfo> {
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillOriginRecord {
+    registry: Option<String>,
+    slug: Option<String>,
+    installed_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenClawSkillsListResponse {
+    workspace_dir: String,
+    managed_skills_dir: String,
+    skills: Vec<OpenClawSkillCatalogRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenClawSkillCatalogRecord {
+    name: String,
+    description: String,
+    emoji: Option<String>,
+    eligible: bool,
+    disabled: bool,
+    blocked_by_allowlist: bool,
+    source: String,
+    bundled: bool,
+    homepage: Option<String>,
+    #[serde(default)]
+    missing: SkillRequirementState,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenClawSkillsCheckResponse {
+    summary: OpenClawSkillsCheckSummary,
+    #[serde(default)]
+    missing_requirements: Vec<OpenClawSkillMissingRequirementRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenClawSkillsCheckSummary {
+    eligible: usize,
+    missing_requirements: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenClawSkillMissingRequirementRecord {
+    name: String,
+    #[serde(default)]
+    install: Vec<SkillInstallHint>,
+}
+
+#[derive(Clone, Copy)]
+struct SkillMarketplacePreset {
+    id: &'static str,
+    label: &'static str,
+    site_url: &'static str,
+    registry_url: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillMarketplaceSearchResponse {
+    #[serde(default)]
+    results: Vec<SkillMarketplaceSearchRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillMarketplaceSearchRecord {
+    slug: Option<String>,
+    display_name: Option<String>,
+    summary: Option<String>,
+    version: Option<String>,
+    updated_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillMarketplaceListResponse {
+    #[serde(default)]
+    items: Vec<SkillMarketplaceListRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillMarketplaceListRecord {
+    slug: String,
+    display_name: String,
+    summary: Option<String>,
+    updated_at: i64,
+    latest_version: Option<SkillMarketplaceVersionRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillMarketplaceVersionRecord {
+    version: String,
+}
+
+fn parse_command_json<T: DeserializeOwned>(result: CommandResult, label: &str) -> Result<T, String> {
+    if !result.success {
+        let detail = if result.stderr.trim().is_empty() {
+            result.stdout.trim().to_string()
+        } else {
+            result.stderr.trim().to_string()
+        };
+        return Err(if detail.is_empty() {
+            label.to_string()
+        } else {
+            format!("{}: {}", label, detail)
+        });
+    }
+
+    let stdout = result.stdout.trim();
+    if stdout.is_empty() {
+        return Err(format!("{}: 返回为空", label));
+    }
+
+    serde_json::from_str(stdout).map_err(|error| format!("{}: {}", label, error))
+}
+
+fn read_skill_origin(entry_path: &Path) -> Option<SkillOriginRecord> {
+    let origin_path = entry_path.join(".clawhub").join("origin.json");
+    let content = std::fs::read_to_string(origin_path).ok()?;
+    serde_json::from_str::<SkillOriginRecord>(&content).ok()
+}
+
+fn collect_managed_skills() -> Vec<SkillInfo> {
     let skills_dir = format!("{}/skills", get_openclaw_home());
-    let path = std::path::Path::new(&skills_dir);
+    let path = Path::new(&skills_dir);
     if !path.exists() || !path.is_dir() {
         return vec![];
     }
@@ -3874,22 +4097,20 @@ fn list_skills() -> Vec<SkillInfo> {
             let mut description = String::new();
             let mut enabled = true;
 
-            // Try package.json
             let pkg_json = entry_path.join("package.json");
             if pkg_json.exists() {
                 if let Ok(content) = std::fs::read_to_string(&pkg_json) {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let Some(v) = json.get("version").and_then(|v| v.as_str()) {
-                            version = v.to_string();
+                        if let Some(value) = json.get("version").and_then(|value| value.as_str()) {
+                            version = value.to_string();
                         }
-                        if let Some(d) = json.get("description").and_then(|v| v.as_str()) {
-                            description = d.to_string();
+                        if let Some(value) = json.get("description").and_then(|value| value.as_str()) {
+                            description = value.to_string();
                         }
                     }
                 }
             }
 
-            // Try manifest.yaml / manifest.yml
             for manifest_name in &["manifest.yaml", "manifest.yml", "skill.yaml", "skill.yml"] {
                 let manifest = entry_path.join(manifest_name);
                 if manifest.exists() {
@@ -3911,8 +4132,7 @@ fn list_skills() -> Vec<SkillInfo> {
                                     .trim_matches('\'')
                                     .to_string();
                             } else if trimmed.starts_with("enabled:") {
-                                let val = trimmed.trim_start_matches("enabled:").trim();
-                                enabled = val != "false";
+                                enabled = trimmed.trim_start_matches("enabled:").trim() != "false";
                             }
                         }
                     }
@@ -3920,18 +4140,398 @@ fn list_skills() -> Vec<SkillInfo> {
                 }
             }
 
+            let origin = read_skill_origin(&entry_path);
             skills.push(SkillInfo {
                 name,
                 version,
                 description,
                 path: entry_path.to_string_lossy().to_string(),
                 enabled,
+                origin_registry: origin.as_ref().and_then(|value| value.registry.clone()),
+                origin_slug: origin.as_ref().and_then(|value| value.slug.clone()),
+                installed_version: origin.and_then(|value| value.installed_version),
             });
         }
     }
 
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills.sort_by(|left, right| left.name.cmp(&right.name));
     skills
+}
+
+fn resolve_skill_marketplace_preset(source: Option<&str>) -> Result<SkillMarketplacePreset, String> {
+    match source.unwrap_or("clawhub").trim().to_ascii_lowercase().as_str() {
+        "" | "clawhub" | "official" => Ok(SkillMarketplacePreset {
+            id: "clawhub",
+            label: "ClawHub 官方",
+            site_url: "https://clawhub.ai",
+            registry_url: "https://clawhub.ai",
+        }),
+        "tencent" | "skillhub" | "skillhub-tencent" => Ok(SkillMarketplacePreset {
+            id: "tencent",
+            label: "腾讯 SkillHub",
+            site_url: "https://skillhub.tencent.com",
+            registry_url: "https://skillhub.tencent.com",
+        }),
+        other => Err(format!("不支持的 Skills 市场来源: {}", other)),
+    }
+}
+
+fn clamp_skill_marketplace_limit(limit: Option<u32>, fallback: u32) -> u32 {
+    limit.unwrap_or(fallback).clamp(1, 24)
+}
+
+async fn discover_skill_marketplace_registry(site_url: &str) -> Option<String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(6))
+        .build()
+        .ok()?;
+    let base = Url::parse(site_url).ok()?;
+
+    for path in ["/.well-known/clawhub.json", "/.well-known/clawdhub.json"] {
+        let Ok(url) = base.join(path) else {
+            continue;
+        };
+        let Ok(response) = client
+            .get(url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+        else {
+            continue;
+        };
+
+        if !response.status().is_success() {
+            continue;
+        }
+
+        let Ok(payload) = response.json::<serde_json::Value>().await else {
+            continue;
+        };
+        let api_base = payload
+            .get("apiBase")
+            .and_then(|value| value.as_str())
+            .or_else(|| payload.get("registry").and_then(|value| value.as_str()))
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if let Some(value) = api_base {
+            return Some(value.to_string());
+        }
+    }
+
+    None
+}
+
+fn build_skills_dashboard_snapshot() -> SkillsDashboardSnapshot {
+    let managed_skills = collect_managed_skills();
+    let managed_dir = format!("{}/skills", get_openclaw_home());
+    let workspace_dir = format!("{}/workspace", get_openclaw_home());
+    let mut warnings = Vec::new();
+
+    let list_args = vec![
+        "skills".to_string(),
+        "list".to_string(),
+        "--json".to_string(),
+    ];
+    let list_payload = parse_command_json::<OpenClawSkillsListResponse>(
+        run_openclaw_args_timeout(&list_args, Duration::from_secs(20)),
+        "读取 OpenClaw skills 列表失败",
+    )
+    .map_err(|error| warnings.push(error))
+    .ok();
+
+    let check_args = vec![
+        "skills".to_string(),
+        "check".to_string(),
+        "--json".to_string(),
+    ];
+    let check_payload = parse_command_json::<OpenClawSkillsCheckResponse>(
+        run_openclaw_args_timeout(&check_args, Duration::from_secs(20)),
+        "检查 OpenClaw skills 依赖失败",
+    )
+    .map_err(|error| warnings.push(error))
+    .ok();
+
+    let managed_map = managed_skills
+        .iter()
+        .cloned()
+        .map(|skill| (skill.name.clone(), skill))
+        .collect::<BTreeMap<_, _>>();
+    let install_hints = check_payload
+        .as_ref()
+        .map(|payload| {
+            payload
+                .missing_requirements
+                .iter()
+                .map(|entry| (entry.name.clone(), entry.install.clone()))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let mut openclaw_skills = list_payload
+        .as_ref()
+        .map(|payload| {
+            payload
+                .skills
+                .iter()
+                .map(|entry| {
+                    let managed_skill = managed_map.get(&entry.name);
+                    OpenClawSkillInfo {
+                        name: entry.name.clone(),
+                        description: entry.description.clone(),
+                        emoji: entry.emoji.clone(),
+                        eligible: entry.eligible,
+                        disabled: entry.disabled,
+                        blocked_by_allowlist: entry.blocked_by_allowlist,
+                        source: entry.source.clone(),
+                        bundled: entry.bundled,
+                        homepage: entry.homepage.clone(),
+                        missing: entry.missing.clone(),
+                        install_hints: install_hints.get(&entry.name).cloned().unwrap_or_default(),
+                        managed_installed: managed_skill.is_some(),
+                        managed_version: managed_skill.and_then(|skill| {
+                            skill.installed_version
+                                .clone()
+                                .or_else(|| (skill.version != "unknown").then(|| skill.version.clone()))
+                        }),
+                        managed_path: managed_skill.map(|skill| skill.path.clone()),
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    openclaw_skills.sort_by(|left, right| {
+        right
+            .eligible
+            .cmp(&left.eligible)
+            .then_with(|| left.source.cmp(&right.source))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    SkillsDashboardSnapshot {
+        workspace_dir: list_payload
+            .as_ref()
+            .map(|payload| payload.workspace_dir.clone())
+            .unwrap_or(workspace_dir),
+        managed_skills_dir: list_payload
+            .as_ref()
+            .map(|payload| payload.managed_skills_dir.clone())
+            .unwrap_or(managed_dir),
+        managed_skills,
+        summary: SkillsDashboardSummary {
+            managed_count: managed_map.len(),
+            bundled_count: openclaw_skills
+                .iter()
+                .filter(|skill| skill.source == "openclaw-bundled")
+                .count(),
+            workspace_count: openclaw_skills
+                .iter()
+                .filter(|skill| skill.source == "openclaw-workspace")
+                .count(),
+            eligible_count: check_payload
+                .as_ref()
+                .map(|payload| payload.summary.eligible)
+                .unwrap_or_else(|| openclaw_skills.iter().filter(|skill| skill.eligible).count()),
+            missing_requirement_count: check_payload
+                .as_ref()
+                .map(|payload| payload.summary.missing_requirements)
+                .unwrap_or_else(|| openclaw_skills.iter().filter(|skill| !skill.missing.is_empty()).count()),
+        },
+        openclaw_skills,
+        warnings,
+    }
+}
+
+#[tauri::command]
+fn list_skills() -> Vec<SkillInfo> {
+    collect_managed_skills()
+}
+
+#[tauri::command]
+async fn get_skills_dashboard_snapshot() -> Result<SkillsDashboardSnapshot, String> {
+    tokio::task::spawn_blocking(build_skills_dashboard_snapshot)
+        .await
+        .map_err(|error| format!("Task panic: {}", error))
+}
+
+#[tauri::command]
+async fn search_skill_marketplace(
+    source: Option<String>,
+    query: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<SkillMarketplaceEntry>, String> {
+    let preset = resolve_skill_marketplace_preset(source.as_deref())?;
+    let registry_base = discover_skill_marketplace_registry(preset.site_url)
+        .await
+        .unwrap_or_else(|| preset.registry_url.to_string());
+    let bounded_limit = clamp_skill_marketplace_limit(limit, 12);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|error| format!("创建 Skills 市场请求失败: {}", error))?;
+
+    let trimmed_query = query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
+    let mut url = if trimmed_query.is_some() {
+        Url::parse(&format!("{}/api/v1/search", registry_base.trim_end_matches('/')))
+            .map_err(|error| format!("构建 Skills 搜索地址失败: {}", error))?
+    } else {
+        Url::parse(&format!("{}/api/v1/skills", registry_base.trim_end_matches('/')))
+            .map_err(|error| format!("构建 Skills 市场地址失败: {}", error))?
+    };
+
+    url.query_pairs_mut()
+        .append_pair("limit", &bounded_limit.to_string());
+    if let Some(value) = trimmed_query.as_deref() {
+        url.query_pairs_mut().append_pair("q", value);
+    }
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("访问 {} 失败: {}", preset.label, error))?;
+    let status = response.status();
+    let payload = response
+        .text()
+        .await
+        .map_err(|error| format!("读取 {} 响应失败: {}", preset.label, error))?;
+
+    if !status.is_success() {
+        let detail = payload.trim();
+        return Err(if detail.is_empty() {
+            format!("{} 返回 HTTP {}", preset.label, status.as_u16())
+        } else {
+            format!("{} 返回 HTTP {}: {}", preset.label, status.as_u16(), detail)
+        });
+    }
+
+    if trimmed_query.is_some() {
+        let parsed = serde_json::from_str::<SkillMarketplaceSearchResponse>(&payload)
+            .map_err(|error| format!("解析 {} 搜索结果失败: {}", preset.label, error))?;
+        Ok(parsed
+            .results
+            .into_iter()
+            .filter_map(|entry| {
+                let slug = entry.slug?;
+                let display_name = entry.display_name.unwrap_or_else(|| slug.clone());
+                Some(SkillMarketplaceEntry {
+                    slug,
+                    display_name,
+                    summary: entry.summary.unwrap_or_default(),
+                    version: entry.version,
+                    updated_at: entry.updated_at,
+                    marketplace: preset.id.to_string(),
+                    marketplace_label: preset.label.to_string(),
+                })
+            })
+            .collect())
+    } else {
+        let parsed = serde_json::from_str::<SkillMarketplaceListResponse>(&payload)
+            .map_err(|error| format!("解析 {} 列表失败: {}", preset.label, error))?;
+        Ok(parsed
+            .items
+            .into_iter()
+            .map(|entry| SkillMarketplaceEntry {
+                slug: entry.slug,
+                display_name: entry.display_name,
+                summary: entry.summary.unwrap_or_default(),
+                version: entry.latest_version.map(|value| value.version),
+                updated_at: Some(entry.updated_at),
+                marketplace: preset.id.to_string(),
+                marketplace_label: preset.label.to_string(),
+            })
+            .collect())
+    }
+}
+
+#[tauri::command]
+async fn install_skill_from_marketplace(
+    source: Option<String>,
+    slug: String,
+    version: Option<String>,
+    force: Option<bool>,
+) -> CommandResult {
+    let preset = match resolve_skill_marketplace_preset(source.as_deref()) {
+        Ok(value) => value,
+        Err(error) => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            }
+        }
+    };
+    let registry_url = discover_skill_marketplace_registry(preset.site_url)
+        .await
+        .unwrap_or_else(|| preset.registry_url.to_string());
+
+    tokio::task::spawn_blocking(move || {
+        let trimmed_slug = slug.trim().to_string();
+        if trimmed_slug.is_empty()
+            || trimmed_slug.contains('/')
+            || trimmed_slug.contains('\\')
+            || trimmed_slug.contains("..")
+        {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "请输入合法的 skill slug".into(),
+                code: Some(1),
+            };
+        }
+
+        let openclaw_home = get_openclaw_home();
+        if let Err(error) = std::fs::create_dir_all(Path::new(&openclaw_home).join("skills")) {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: format!("创建 Skills 目录失败: {}", error),
+                code: Some(1),
+            };
+        }
+
+        let mut args = vec![
+            "--workdir".to_string(),
+            openclaw_home,
+            "--dir".to_string(),
+            "skills".to_string(),
+            "--site".to_string(),
+            preset.site_url.to_string(),
+            "--registry".to_string(),
+            registry_url,
+            "--no-input".to_string(),
+            "install".to_string(),
+            trimmed_slug,
+        ];
+
+        if let Some(value) = version
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            args.push("--version".to_string());
+            args.push(value.to_string());
+        }
+        if force.unwrap_or(false) {
+            args.push("--force".to_string());
+        }
+
+        run_cmd_owned_timeout("clawhub", &args, Duration::from_secs(180))
+    })
+    .await
+    .unwrap_or_else(|error| CommandResult {
+        success: false,
+        stdout: String::new(),
+        stderr: format!("Task panic: {}", error),
+        code: None,
+    })
 }
 
 #[tauri::command]
@@ -8196,7 +8796,7 @@ async fn install_default_skills(app: AppHandle) -> CommandResult {
             "skill-install-log",
             InstallEvent {
                 level: "info".into(),
-                message: "如需更多扩展，请在控制面板里打开 ClawHub 后按需安装。".into(),
+                message: "如需更多扩展，请在控制面板的 Skills 页面里按需安装第三方技能。".into(),
             },
         );
 
@@ -8468,6 +9068,9 @@ pub fn run() {
             validate_api_key,
             install_default_skills,
             list_skills,
+            get_skills_dashboard_snapshot,
+            search_skill_marketplace,
+            install_skill_from_marketplace,
             delete_skill,
             list_agents,
             create_agent,
