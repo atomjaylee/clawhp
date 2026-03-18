@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
+import PageShell from "@/components/PageShell";
 import type { SystemInfo, CommandResult, DashboardTab } from "@/types";
 
 interface Props {
@@ -434,8 +435,31 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   }
 
   return (
-    <ScrollArea className="flex-1">
-      <div className="p-5 space-y-5">
+    <PageShell
+      bodyClassName="space-y-5"
+      header={(
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold">仪表盘</h2>
+            <p className="text-[11px] text-muted-foreground">
+              聚合网关、模型和安全状态，优先显示你现在最需要处理的事情。
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={async () => {
+              setGwStatus("checking");
+              await Promise.all([checkGateway(), refreshSnapshots(), refreshConfiguredPrimaryModel()]);
+            }}
+            disabled={gwBusy || statusLoading}
+          >
+            {statusLoading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            {statusLoading ? "同步中..." : "刷新状态"}
+          </Button>
+        </div>
+      )}
+    >
         <Card className={gwRunning ? "border-emerald-500/20" : "border-amber-500/20"}>
           <CardContent className="p-5">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -770,8 +794,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
             </CardContent>
           </Card>
         </div>
-      </div>
-    </ScrollArea>
+    </PageShell>
   );
 }
 

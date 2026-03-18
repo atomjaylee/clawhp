@@ -19,6 +19,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import PageShell from "@/components/PageShell";
 import type { CommandResult, LogEntry } from "@/types";
 
 interface ChannelEntry {
@@ -1001,8 +1002,8 @@ export default function ChannelsPage() {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex flex-1 flex-col overflow-hidden">
-        <div className="shrink-0 border-b border-white/[0.06] bg-background/95 px-5 py-5 backdrop-blur-sm">
+      <PageShell
+        header={(
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5">
               <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/10">
@@ -1029,120 +1030,116 @@ export default function ChannelsPage() {
               </Button>
             </div>
           </div>
-        </div>
-
-        <ScrollArea className="flex-1">
-          <div className="space-y-4 p-5 pb-5">
-            {error && (
-              <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-300">
-                {error}
-              </div>
-            )}
-
-            {loading ? (
-              <div className="flex items-center justify-center py-20 text-muted-foreground">
-                <Loader2 size={18} className="mr-2 animate-spin" />
-                <span className="text-[13px]">加载中...</span>
-              </div>
-            ) : channels.length === 0 ? (
-              <Card>
-                <CardContent className="py-16 text-center">
-                  <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-500/10">
-                    <Radio size={22} className="text-violet-400" />
-                  </div>
-                  <h3 className="mb-1 text-[14px] font-semibold">先接入一个飞书频道</h3>
-                  <p className="mx-auto mb-4 max-w-sm text-[12px] text-muted-foreground">
-                    点击“添加飞书”后会直接在应用内检测并安装官方插件，接着可以扫码创建新机器人，或绑定已有机器人，不再跳出命令行窗口。
-                  </p>
-                  <div className="flex justify-center gap-2">
-                    <Button size="sm" onClick={() => void openFeishuDialog()}>
-                      <Plus size={14} /> 添加飞书
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            ) : (
-              <div className="space-y-3">
-                {channels.map((channel) => {
-                  const info = getChannelInfo(channel.channel);
-                  const status = getStatus(channel.channel, channel.account);
-                  const statusMeta = status ? getChannelStatusMeta(status.state) : null;
-                  const key = `${channel.channel}:${channel.account}`;
-
-                  return (
-                    <Card key={key} className="group transition-colors hover:border-violet-500/20">
-                      <CardContent className="p-4">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="flex min-w-0 items-center gap-3">
-                            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/10">
-                              <MessageSquare size={16} className="text-violet-400" />
-                            </div>
-                            <div className="min-w-0">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-[13px] font-semibold">{channel.name}</span>
-                                <Badge variant="secondary" className={`px-1.5 py-0 text-[10px] ${info.color}`}>
-                                  {info.label}
-                                </Badge>
-                                {status && statusMeta && (
-                                  <span className={`flex items-center gap-1 text-[10px] ${statusMeta.className}`}>
-                                    {statusMeta.icon}
-                                    {statusMeta.label}
-                                  </span>
-                                )}
-                                {checkingStatus && !status && (
-                                  <Loader2 size={10} className="animate-spin text-muted-foreground" />
-                                )}
-                              </div>
-                              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                                账号: {channel.account}
-                                {!channel.enabled && <span className="ml-2 text-amber-400">已禁用</span>}
-                              </p>
-                              {status?.message && (
-                                <p className="mt-1 text-[11px] text-muted-foreground">{status.message}</p>
-                              )}
-                            </div>
-                          </div>
-                          <div className="flex shrink-0 items-center gap-1">
-                            {channel.channel === "feishu" && (
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-7 w-7 text-muted-foreground opacity-0 transition-opacity hover:text-sky-300 group-hover:opacity-100"
-                                    onClick={() => void openFeishuDialog(channel.account)}
-                                  >
-                                    <Settings2 size={13} />
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>管理飞书官方插件</TooltipContent>
-                              </Tooltip>
-                            )}
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-7 w-7 text-muted-foreground opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
-                                  onClick={() => void handleRemove(channel.channel, channel.account)}
-                                  disabled={removing === key}
-                                >
-                                  {removing === key ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent>移除频道</TooltipContent>
-                            </Tooltip>
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  );
-                })}
-              </div>
-            )}
+        )}
+      >
+        {error && (
+          <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-300">
+            {error}
           </div>
-        </ScrollArea>
-      </div>
+        )}
+
+        {loading ? (
+          <div className="flex items-center justify-center py-20 text-muted-foreground">
+            <Loader2 size={18} className="mr-2 animate-spin" />
+            <span className="text-[13px]">加载中...</span>
+          </div>
+        ) : channels.length === 0 ? (
+          <Card>
+            <CardContent className="py-16 text-center">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-500/10">
+                <Radio size={22} className="text-violet-400" />
+              </div>
+              <h3 className="mb-1 text-[14px] font-semibold">先接入一个飞书频道</h3>
+              <p className="mx-auto mb-4 max-w-sm text-[12px] text-muted-foreground">
+                点击“添加飞书”后会直接在应用内检测并安装官方插件，接着可以扫码创建新机器人，或绑定已有机器人，不再跳出命令行窗口。
+              </p>
+              <div className="flex justify-center gap-2">
+                <Button size="sm" onClick={() => void openFeishuDialog()}>
+                  <Plus size={14} /> 添加飞书
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="space-y-3">
+            {channels.map((channel) => {
+              const info = getChannelInfo(channel.channel);
+              const status = getStatus(channel.channel, channel.account);
+              const statusMeta = status ? getChannelStatusMeta(status.state) : null;
+              const key = `${channel.channel}:${channel.account}`;
+
+              return (
+                <Card key={key} className="group transition-colors hover:border-violet-500/20">
+                  <CardContent className="p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/10">
+                          <MessageSquare size={16} className="text-violet-400" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-[13px] font-semibold">{channel.name}</span>
+                            <Badge variant="secondary" className={`px-1.5 py-0 text-[10px] ${info.color}`}>
+                              {info.label}
+                            </Badge>
+                            {status && statusMeta && (
+                              <span className={`flex items-center gap-1 text-[10px] ${statusMeta.className}`}>
+                                {statusMeta.icon}
+                                {statusMeta.label}
+                              </span>
+                            )}
+                            {checkingStatus && !status && (
+                              <Loader2 size={10} className="animate-spin text-muted-foreground" />
+                            )}
+                          </div>
+                          <p className="mt-0.5 text-[11px] text-muted-foreground">
+                            账号: {channel.account}
+                            {!channel.enabled && <span className="ml-2 text-amber-400">已禁用</span>}
+                          </p>
+                          {status?.message && (
+                            <p className="mt-1 text-[11px] text-muted-foreground">{status.message}</p>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1">
+                        {channel.channel === "feishu" && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7 text-muted-foreground opacity-0 transition-opacity hover:text-sky-300 group-hover:opacity-100"
+                                onClick={() => void openFeishuDialog(channel.account)}
+                              >
+                                <Settings2 size={13} />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>管理飞书官方插件</TooltipContent>
+                          </Tooltip>
+                        )}
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7 text-muted-foreground opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
+                              onClick={() => void handleRemove(channel.channel, channel.account)}
+                              disabled={removing === key}
+                            >
+                              {removing === key ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>移除频道</TooltipContent>
+                        </Tooltip>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        )}
+      </PageShell>
 
       {dialogOpen && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm" onClick={closeDialog}>

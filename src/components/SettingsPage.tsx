@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Progress } from "@/components/ui/progress";
+import PageShell from "@/components/PageShell";
 import type { SystemInfo, CommandResult, LogEntry } from "@/types";
 
 const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => setTimeout(r, 0)));
@@ -341,8 +342,22 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
         : null;
 
   return (
-    <ScrollArea className="flex-1">
-      <div className="p-5 space-y-4">
+    <PageShell
+      header={(
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold">设置与维护</h2>
+            <p className="text-[11px] text-muted-foreground">
+              当前版本 {currentVersion}，集中管理更新、路径和卸载操作。
+            </p>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => { void refreshSystemInfo(); void refreshUpdateSignals(); }} disabled={updateStatusLoading || githubReleaseLoading || updatePhase === "running" || uninstallPhase === "running"}>
+            {(updateStatusLoading || githubReleaseLoading) ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            {(updateStatusLoading || githubReleaseLoading) ? "检查中..." : "刷新状态"}
+          </Button>
+        </div>
+      )}
+    >
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           {/* Onboard */}
           <Card>
@@ -689,8 +704,7 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
             )}
           </CardContent>
         </Card>
-      </div>
-    </ScrollArea>
+    </PageShell>
   );
 }
 

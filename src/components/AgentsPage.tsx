@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ConfirmActionDialog } from "@/components/ConfirmActionDialog";
+import PageShell from "@/components/PageShell";
 import type { AgentInfo, CommandResult, ProviderInfo } from "@/types";
 
 const inputCls = "w-full h-9 px-3 text-[13px] rounded-lg border border-white/[0.08] bg-white/[0.03] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/30 transition-colors";
@@ -407,8 +408,8 @@ export default function AgentsPage() {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <ScrollArea className="flex-1">
-        <div className="p-5 space-y-4">
+      <PageShell
+        header={(
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/10">
@@ -434,6 +435,8 @@ export default function AgentsPage() {
               </Button>
             </div>
           </div>
+        )}
+      >
 
           {createSuccess && (
             <div className="flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/8 px-3 py-2.5 text-[12px] text-emerald-300">
@@ -670,8 +673,7 @@ export default function AgentsPage() {
               </div>
             </>
           )}
-        </div>
-      </ScrollArea>
+      </PageShell>
       {createDialogOpen && (
         <div
           className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm"

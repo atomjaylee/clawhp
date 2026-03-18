@@ -6,8 +6,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import PageShell from "@/components/PageShell";
 import type { SkillInfo, CommandResult } from "@/types";
 
 export default function SkillsPage() {
@@ -43,8 +43,8 @@ export default function SkillsPage() {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <ScrollArea className="flex-1">
-        <div className="p-5 space-y-4">
+      <PageShell
+        header={(
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-teal-500/10">
@@ -71,6 +71,8 @@ export default function SkillsPage() {
               </Button>
             </div>
           </div>
+        )}
+      >
 
           {loading ? (
             <div className="flex items-center justify-center py-20 text-muted-foreground">
@@ -86,8 +88,7 @@ export default function SkillsPage() {
               ))}
             </div>
           )}
-        </div>
-      </ScrollArea>
+      </PageShell>
     </TooltipProvider>
   );
 }

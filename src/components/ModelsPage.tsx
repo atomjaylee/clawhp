@@ -7,9 +7,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ConfirmActionDialog } from "@/components/ConfirmActionDialog";
+import PageShell from "@/components/PageShell";
 import type { ProviderInfo, CommandResult } from "@/types";
 
 type View = "list" | "add" | "sync" | "refresh";
@@ -342,8 +342,8 @@ export default function ModelsPage() {
   if (view === "add" || view === "sync" || view === "refresh") {
     return (
       <TooltipProvider delayDuration={300}>
-        <ScrollArea className="flex-1">
-          <div className="p-5 space-y-4">
+        <PageShell
+          header={(
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold">
                 {view === "add" ? "添加 Provider" : view === "sync" ? "选择模型" : "刷新 Provider"}
@@ -352,6 +352,8 @@ export default function ModelsPage() {
                 <X /> 取消
               </Button>
             </div>
+          )}
+        >
 
             {view === "add" && (
               <>
@@ -566,16 +568,15 @@ export default function ModelsPage() {
                 </div>
               </>
             )}
-          </div>
-        </ScrollArea>
+        </PageShell>
       </TooltipProvider>
     );
   }
 
   return (
     <TooltipProvider delayDuration={300}>
-      <ScrollArea className="flex-1">
-        <div className="p-5 space-y-4">
+      <PageShell
+        header={(
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/10">
@@ -602,6 +603,8 @@ export default function ModelsPage() {
               </Button>
             </div>
           </div>
+        )}
+      >
 
           {primaryModel && (
             <Card className="border-amber-500/15">
@@ -654,8 +657,7 @@ export default function ModelsPage() {
               ))}
             </div>
           )}
-        </div>
-      </ScrollArea>
+      </PageShell>
       <ConfirmActionDialog
         open={Boolean(pendingDelete)}
         title={
