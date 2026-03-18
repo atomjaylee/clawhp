@@ -3231,6 +3231,94 @@ fn agent_bindings_from_config(item: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn normalize_binding_peer_kind(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "direct" | "dm" => Some("direct"),
+        "group" | "channel" => Some("group"),
+        _ => None,
+    }
+}
+
+fn binding_display_from_match(match_value: &serde_json::Value) -> Option<String> {
+    let binding_match = match_value.as_object()?;
+    let channel = binding_match
+        .get("channel")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+
+    let mut parts = vec![channel.to_string()];
+    if let Some(account_id) = binding_match
+        .get("accountId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(account_id.to_string());
+    }
+
+    if let Some(peer) = binding_match.get("peer").and_then(|value| value.as_object()) {
+        let peer_kind = peer
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .and_then(normalize_binding_peer_kind)?;
+        let peer_id = peer
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        parts.push(peer_kind.to_string());
+        parts.push(peer_id.to_string());
+    }
+
+    Some(parts.join(":"))
+}
+
+fn top_level_agent_bindings_from_config(config: &serde_json::Value, agent_id: &str) -> Vec<String> {
+    let Some(bindings) = config.get("bindings").and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+
+    bindings
+        .iter()
+        .filter(|binding| {
+            binding
+                .get("type")
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref()
+                != Some("acp")
+        })
+        .filter(|binding| {
+            binding
+                .get("agentId")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value == agent_id)
+        })
+        .filter_map(|binding| binding.get("match"))
+        .filter_map(binding_display_from_match)
+        .collect()
+}
+
+fn merge_agent_binding_lists(binding_groups: &[Vec<String>]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut merged = Vec::new();
+
+    for group in binding_groups {
+        for binding in group {
+            let trimmed = binding.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if seen.insert(trimmed.to_string()) {
+                merged.push(trimmed.to_string());
+            }
+        }
+    }
+
+    merged
+}
+
 fn agent_bindings_from_routes(item: &serde_json::Value) -> Vec<String> {
     item.get("routes")
         .and_then(|value| value.as_array())
@@ -3332,6 +3420,7 @@ fn find_config_agent_item<'a>(
 
 fn agent_info_from_config_item(
     item: &serde_json::Value,
+    config: &serde_json::Value,
     default_model: &str,
     default_workspace: &str,
 ) -> Option<AgentInfo> {
@@ -3360,7 +3449,10 @@ fn agent_info_from_config_item(
         path: agent_root_from_agent_dir(&id, &agent_dir),
         workspace,
         agent_dir: agent_dir.clone(),
-        bindings: agent_bindings_from_config(item),
+        bindings: merge_agent_binding_lists(&[
+            top_level_agent_bindings_from_config(config, &id),
+            agent_bindings_from_config(item),
+        ]),
         skills: read_agent_synced_models(&agent_dir),
     })
 }
@@ -3369,7 +3461,7 @@ fn created_agent_from_config(config: &serde_json::Value, agent_id: &str) -> Opti
     let item = find_config_agent_item(config, agent_id)?;
     let default_model = default_agents_model(Some(config));
     let default_workspace = default_agents_workspace(Some(config));
-    agent_info_from_config_item(item, &default_model, &default_workspace)
+    agent_info_from_config_item(item, config, &default_model, &default_workspace)
 }
 
 fn verify_created_agent(
@@ -3457,7 +3549,9 @@ fn list_agents_from_config_value(config: &serde_json::Value) -> Vec<AgentInfo> {
                 .and_then(|value| value.as_str())
                 .is_none_or(|id| seen_ids.insert(id.to_string()))
         })
-        .filter_map(|item| agent_info_from_config_item(item, &default_model, &default_workspace))
+        .filter_map(|item| {
+            agent_info_from_config_item(item, config, &default_model, &default_workspace)
+        })
         .collect()
 }
 
@@ -3638,10 +3732,25 @@ fn list_agents_from_cli(config: Option<&serde_json::Value>) -> Result<Vec<AgentI
             })
             .map(|value| value.to_string())
             .unwrap_or_else(|| default_agent_dir(&id).to_string_lossy().to_string());
-        let bindings = config_item
-            .map(agent_bindings_from_config)
-            .filter(|bindings| !bindings.is_empty())
-            .unwrap_or_else(|| agent_bindings_from_routes(&item));
+        let bindings = {
+            let config_bindings = config
+                .map(|value| top_level_agent_bindings_from_config(value, &id))
+                .unwrap_or_default();
+            let legacy_bindings = config_item
+                .map(agent_bindings_from_config)
+                .unwrap_or_default();
+            let cli_bindings = agent_bindings_from_routes(&item);
+            let merged = merge_agent_binding_lists(&[
+                config_bindings,
+                legacy_bindings,
+                cli_bindings,
+            ]);
+            if merged.is_empty() {
+                agent_bindings_from_routes(&item)
+            } else {
+                merged
+            }
+        };
         let model = item
             .get("model")
             .and_then(|value| value.as_str())
@@ -5547,6 +5656,22 @@ struct FeishuAuthPollPayload {
     error_description: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeishuRouteBindingPayload {
+    agent_id: String,
+    scope: String,
+    account_id: Option<String>,
+    peer_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeishuRouteBindingsSnapshotPayload {
+    default_account_id: String,
+    routes: Vec<FeishuRouteBindingPayload>,
+}
+
 fn normalize_feishu_env(value: Option<&str>) -> &'static str {
     match value.unwrap_or("prod").trim().to_ascii_lowercase().as_str() {
         "boe" => "boe",
@@ -5565,6 +5690,185 @@ fn normalize_feishu_domain(value: Option<&str>) -> &'static str {
         "lark" => "lark",
         _ => "feishu",
     }
+}
+
+fn read_feishu_default_account_id(config: &serde_json::Value) -> String {
+    config
+        .pointer("/channels/feishu/defaultAccount")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            config
+                .pointer("/channels/feishu/accounts")
+                .and_then(|value| value.as_object())
+                .and_then(|value| value.keys().next().cloned())
+        })
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn is_feishu_route_binding(binding: &serde_json::Value) -> bool {
+    let binding_type = binding
+        .get("type")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_lowercase());
+    if matches!(binding_type.as_deref(), Some("acp")) {
+        return false;
+    }
+
+    binding
+        .get("match")
+        .and_then(|value| value.get("channel"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().eq_ignore_ascii_case("feishu"))
+        .unwrap_or(false)
+}
+
+fn feishu_route_binding_from_value(
+    binding: &serde_json::Value,
+) -> Option<FeishuRouteBindingPayload> {
+    if !is_feishu_route_binding(binding) {
+        return None;
+    }
+
+    let agent_id = binding
+        .get("agentId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let binding_match = binding.get("match")?.as_object()?;
+    let account_id = binding_match
+        .get("accountId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
+    if let Some(peer) = binding_match.get("peer").and_then(|value| value.as_object()) {
+        let scope = peer
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .and_then(normalize_binding_peer_kind)?
+            .to_string();
+        let peer_id = peer
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?
+            .to_string();
+
+        return Some(FeishuRouteBindingPayload {
+            agent_id,
+            scope,
+            account_id,
+            peer_id: Some(peer_id),
+        });
+    }
+
+    Some(FeishuRouteBindingPayload {
+        agent_id,
+        scope: "account".to_string(),
+        account_id,
+        peer_id: None,
+    })
+}
+
+fn feishu_route_binding_to_value(
+    route: &FeishuRouteBindingPayload,
+) -> Result<serde_json::Value, String> {
+    let agent_id = route.agent_id.trim();
+    if agent_id.is_empty() {
+        return Err("绑定的 Agent ID 不能为空".to_string());
+    }
+
+    let scope = route.scope.trim().to_ascii_lowercase();
+    let account_id = route
+        .account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
+    let mut binding_match = serde_json::Map::new();
+    binding_match.insert("channel".to_string(), serde_json::json!("feishu"));
+    if let Some(account_id_value) = account_id {
+        binding_match.insert("accountId".to_string(), serde_json::json!(account_id_value));
+    }
+
+    match scope.as_str() {
+        "account" => {}
+        "direct" | "dm" => {
+            let peer_id = route
+                .peer_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "私聊路由需要填写用户 Open ID".to_string())?;
+            binding_match.insert(
+                "peer".to_string(),
+                serde_json::json!({
+                    "kind": "direct",
+                    "id": peer_id,
+                }),
+            );
+        }
+        "group" | "channel" => {
+            let peer_id = route
+                .peer_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "群组路由需要填写群组 ID".to_string())?;
+            binding_match.insert(
+                "peer".to_string(),
+                serde_json::json!({
+                    "kind": "group",
+                    "id": peer_id,
+                }),
+            );
+        }
+        _ => {
+            return Err(format!("不支持的飞书路由类型: {}", route.scope.trim()));
+        }
+    }
+
+    Ok(serde_json::json!({
+        "agentId": agent_id,
+        "match": binding_match,
+    }))
+}
+
+fn remove_feishu_route_bindings_from_config(
+    config: &mut serde_json::Value,
+    removed_account_id: Option<&str>,
+) {
+    let Some(bindings) = config.get_mut("bindings").and_then(|value| value.as_array_mut()) else {
+        return;
+    };
+
+    let removed_account_id = removed_account_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    bindings.retain(|binding| {
+        if !is_feishu_route_binding(binding) {
+            return true;
+        }
+
+        let Some(target_account_id) = removed_account_id else {
+            return false;
+        };
+
+        binding
+            .get("match")
+            .and_then(|value| value.get("accountId"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none_or(|value| value != target_account_id)
+    });
 }
 
 fn feishu_accounts_base_url(domain: &str, env: &str) -> &'static str {
@@ -5923,6 +6227,88 @@ fn get_feishu_plugin_status() -> CommandResult {
     CommandResult {
         success: true,
         stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+fn get_feishu_multi_agent_bindings() -> CommandResult {
+    let config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    let routes = config
+        .get("bindings")
+        .and_then(|value| value.as_array())
+        .map(|bindings| {
+            bindings
+                .iter()
+                .filter_map(feishu_route_binding_from_value)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let payload = FeishuRouteBindingsSnapshotPayload {
+        default_account_id: read_feishu_default_account_id(&config),
+        routes,
+    };
+
+    CommandResult {
+        success: true,
+        stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+fn save_feishu_multi_agent_bindings(routes: Vec<FeishuRouteBindingPayload>) -> CommandResult {
+    let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    if !config.is_object() {
+        config = serde_json::json!({});
+    }
+
+    let rebuilt_routes = match routes
+        .iter()
+        .map(feishu_route_binding_to_value)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            };
+        }
+    };
+
+    if config.get("bindings").is_none() || !config["bindings"].is_array() {
+        config["bindings"] = serde_json::json!([]);
+    }
+
+    remove_feishu_route_bindings_from_config(&mut config, None);
+
+    if let Some(bindings) = config.get_mut("bindings").and_then(|value| value.as_array_mut()) {
+        bindings.extend(rebuilt_routes);
+    }
+
+    if let Err(error) = write_openclaw_config(&config) {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: error,
+            code: Some(1),
+        };
+    }
+
+    restart_gateway_in_background();
+
+    CommandResult {
+        success: true,
+        stdout: format!(
+            "已保存 {} 条飞书多 Agent 路由，网关正在后台刷新",
+            routes.len()
+        ),
         stderr: String::new(),
         code: Some(0),
     }
@@ -6872,6 +7258,8 @@ async fn remove_channel(channel: String, account: Option<String>) -> CommandResu
                 channels.remove("feishu");
             }
 
+            remove_feishu_route_bindings_from_config(&mut config, None);
+
             return match write_openclaw_config(&config) {
                 Ok(_) => CommandResult {
                     success: true,
@@ -6910,6 +7298,7 @@ async fn remove_channel(channel: String, account: Option<String>) -> CommandResu
             {
                 channels.remove("feishu");
             }
+            remove_feishu_route_bindings_from_config(&mut config, None);
         } else {
             let current_default = config
                 .pointer("/channels/feishu/defaultAccount")
@@ -6919,6 +7308,7 @@ async fn remove_channel(channel: String, account: Option<String>) -> CommandResu
                 config["channels"]["feishu"]["defaultAccount"] =
                     serde_json::json!(remaining_accounts[0].clone());
             }
+            remove_feishu_route_bindings_from_config(&mut config, Some(&account_id));
         }
 
         return match write_openclaw_config(&config) {
@@ -7368,6 +7758,7 @@ pub fn run() {
             open_feishu_plugin_terminal,
             bind_existing_feishu_app,
             get_feishu_plugin_status,
+            get_feishu_multi_agent_bindings,
             install_feishu_plugin,
             start_feishu_auth_session,
             poll_feishu_auth_session,
@@ -7376,6 +7767,7 @@ pub fn run() {
             list_channels_snapshot,
             get_feishu_channel_config,
             get_channel_status,
+            save_feishu_multi_agent_bindings,
             save_feishu_channel,
             remove_channel,
         ])

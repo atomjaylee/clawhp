@@ -1,14 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import QRCode from "qrcode";
 import {
+  Bot,
+  ChevronDown,
+  ChevronUp,
   CheckCircle2,
   Loader2,
   MessageSquare,
   Plus,
   Radio,
   RefreshCw,
+  Route,
   Settings2,
   Trash2,
   Wifi,
@@ -20,7 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import PageShell from "@/components/PageShell";
-import type { CommandResult, LogEntry } from "@/types";
+import type { AgentInfo, CommandResult, LogEntry } from "@/types";
 
 interface ChannelEntry {
   channel: string;
@@ -79,6 +83,20 @@ interface ExistingFeishuBindingForm {
   domain: "feishu" | "lark";
 }
 
+type FeishuRouteScope = "account" | "direct" | "group";
+
+interface FeishuMultiAgentRoute {
+  agentId: string;
+  scope: FeishuRouteScope;
+  accountId?: string | null;
+  peerId?: string | null;
+}
+
+interface FeishuMultiAgentBindingsSnapshot {
+  defaultAccountId: string;
+  routes: FeishuMultiAgentRoute[];
+}
+
 const CHANNEL_LABELS: Record<string, { label: string; color: string }> = {
   telegram: { label: "Telegram", color: "bg-sky-500/15 text-sky-400" },
   whatsapp: { label: "WhatsApp", color: "bg-emerald-500/15 text-emerald-400" },
@@ -98,9 +116,38 @@ const CHANNEL_LABELS: Record<string, { label: string; color: string }> = {
 };
 
 const inputCls = "w-full h-9 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 text-[13px] text-foreground placeholder:text-muted-foreground/45 focus:outline-none focus:ring-1 focus:ring-sky-400/40";
+const FEISHU_DEFAULT_ACCOUNT_SCOPE = "__default__";
 
 function getChannelInfo(ch: string) {
   return CHANNEL_LABELS[ch] ?? { label: ch, color: "bg-white/10 text-foreground/70" };
+}
+
+function normalizeFeishuRouteScope(value: string | null | undefined): FeishuRouteScope {
+  if (value === "group" || value === "channel") {
+    return "group";
+  }
+  if (value === "direct" || value === "dm") {
+    return "direct";
+  }
+  return "account";
+}
+
+function createEmptyFeishuRoute(agentId = "", accountId?: string | null): FeishuMultiAgentRoute {
+  return {
+    agentId,
+    scope: "account",
+    accountId: accountId?.trim() ? accountId.trim() : null,
+    peerId: "",
+  };
+}
+
+function normalizeFeishuRoute(route: FeishuMultiAgentRoute): FeishuMultiAgentRoute {
+  return {
+    agentId: route.agentId?.trim() ?? "",
+    scope: normalizeFeishuRouteScope(route.scope),
+    accountId: route.accountId?.trim() ? route.accountId.trim() : null,
+    peerId: route.peerId?.trim() ? route.peerId.trim() : "",
+  };
 }
 
 function parseJsonValue<T>(raw: string, fallback: T): T {
@@ -464,6 +511,13 @@ export default function ChannelsPage() {
   });
   const [existingBinding, setExistingBinding] = useState(false);
   const [existingBindingError, setExistingBindingError] = useState("");
+  const [availableAgents, setAvailableAgents] = useState<AgentInfo[]>([]);
+  const [feishuRoutes, setFeishuRoutes] = useState<FeishuMultiAgentRoute[]>([]);
+  const [feishuDefaultAccountId, setFeishuDefaultAccountId] = useState("default");
+  const [routesLoading, setRoutesLoading] = useState(false);
+  const [routesSaving, setRoutesSaving] = useState(false);
+  const [routesError, setRoutesError] = useState("");
+  const [routesHint, setRoutesHint] = useState("");
 
   const installProgressRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const installLogEndRef = useRef<HTMLDivElement | null>(null);
@@ -514,6 +568,90 @@ export default function ChannelsPage() {
       unlisten.then((fn) => fn());
     };
   }, [appendInstallLog]);
+
+  const feishuAccounts = useMemo(() => {
+    const seen = new Set<string>();
+    return channels
+      .filter((entry) => entry.channel === "feishu")
+      .filter((entry) => {
+        const accountId = entry.account.trim();
+        if (!accountId || seen.has(accountId)) {
+          return false;
+        }
+        seen.add(accountId);
+        return true;
+      });
+  }, [channels]);
+
+  const routeAgentOptions = useMemo(() => {
+    const options = new Map<string, string>();
+
+    for (const agent of availableAgents) {
+      options.set(agent.id, agent.name || agent.id);
+    }
+
+    for (const route of feishuRoutes) {
+      const routeAgentId = route.agentId.trim();
+      if (routeAgentId && !options.has(routeAgentId)) {
+        options.set(routeAgentId, `${routeAgentId}（已缺失）`);
+      }
+    }
+
+    return Array.from(options.entries()).map(([id, label]) => ({ id, label }));
+  }, [availableAgents, feishuRoutes]);
+
+  const routeAccountOptions = useMemo(() => {
+    const options = new Map<string, string>();
+
+    for (const account of feishuAccounts) {
+      options.set(
+        account.account,
+        `${account.name} (${account.account}${account.account === feishuDefaultAccountId ? "，当前默认" : ""})`,
+      );
+    }
+
+    for (const route of feishuRoutes) {
+      const accountId = route.accountId?.trim();
+      if (accountId && accountId !== "*" && !options.has(accountId)) {
+        options.set(accountId, `${accountId}（已缺失）`);
+      }
+    }
+
+    return Array.from(options.entries()).map(([id, label]) => ({ id, label }));
+  }, [feishuAccounts, feishuDefaultAccountId, feishuRoutes]);
+
+  const loadFeishuMultiAgentBindings = useCallback(async () => {
+    setRoutesLoading(true);
+    setRoutesError("");
+
+    try {
+      const [bindingsResult, agentList] = await Promise.all([
+        invoke("get_feishu_multi_agent_bindings") as Promise<CommandResult>,
+        invoke("list_agents") as Promise<AgentInfo[]>,
+      ]);
+
+      setAvailableAgents(Array.isArray(agentList) ? agentList : []);
+
+      if (!bindingsResult.success) {
+        setRoutesError(bindingsResult.stderr || "飞书多 Agent 路由读取失败");
+        return;
+      }
+
+      const snapshot = parseJsonValue<FeishuMultiAgentBindingsSnapshot | null>(bindingsResult.stdout, null);
+      if (!snapshot) {
+        setRoutesError("飞书多 Agent 路由解析失败");
+        return;
+      }
+
+      setFeishuDefaultAccountId(snapshot.defaultAccountId?.trim() || "default");
+      setFeishuRoutes((snapshot.routes ?? []).map((route) => normalizeFeishuRoute(route)));
+    } catch (e) {
+      setRoutesError(`${e}`);
+      setAvailableAgents([]);
+    } finally {
+      setRoutesLoading(false);
+    }
+  }, []);
 
   const fetchChannels = useCallback(async (options?: { silent?: boolean }) => {
     if (!options?.silent) {
@@ -629,6 +767,13 @@ export default function ChannelsPage() {
       appSecret: "",
       domain: "feishu",
     });
+    setAvailableAgents([]);
+    setFeishuRoutes([]);
+    setFeishuDefaultAccountId("default");
+    setRoutesLoading(false);
+    setRoutesSaving(false);
+    setRoutesError("");
+    setRoutesHint("");
   }, []);
 
   const loadFeishuSetup = useCallback(async () => {
@@ -712,8 +857,14 @@ export default function ChannelsPage() {
       } catch {
         // The page-level refresh already manages its own error state.
       }
+
+      try {
+        await loadFeishuMultiAgentBindings();
+      } catch {
+        // Route loading already owns its local error state.
+      }
     })();
-  }, [refreshAll]);
+  }, [loadFeishuMultiAgentBindings, refreshAll]);
 
   const beginFeishuBinding = useCallback(async () => {
     setSetupError("");
@@ -759,17 +910,17 @@ export default function ChannelsPage() {
     setEditingAccountId(accountId ?? null);
     setDialogOpen(true);
     resetFeishuDialogState();
-    await loadFeishuSetup();
-  }, [loadFeishuSetup, resetFeishuDialogState]);
+    await Promise.all([loadFeishuSetup(), loadFeishuMultiAgentBindings()]);
+  }, [loadFeishuMultiAgentBindings, loadFeishuSetup, resetFeishuDialogState]);
 
   const closeDialog = useCallback(() => {
-    if (installPhase === "running" || bindingPhase === "finalizing" || existingBinding) {
+    if (installPhase === "running" || bindingPhase === "finalizing" || existingBinding || routesSaving) {
       return;
     }
     setDialogOpen(false);
     setEditingAccountId(null);
     resetFeishuDialogState();
-  }, [bindingPhase, existingBinding, installPhase, resetFeishuDialogState]);
+  }, [bindingPhase, existingBinding, installPhase, resetFeishuDialogState, routesSaving]);
 
   const handleRemove = async (channel: string, account: string) => {
     if (!confirm(`确定移除 ${getChannelInfo(channel).label} (${account}) 吗？`)) return;
@@ -880,6 +1031,101 @@ export default function ChannelsPage() {
       setExistingBinding(false);
     }
   }, [applyFeishuBindingSuccess, existingBindingForm]);
+
+  const handleAddFeishuRoute = useCallback(() => {
+    setRoutesError("");
+    setRoutesHint("");
+    setFeishuRoutes((prev) => [
+      ...prev,
+      createEmptyFeishuRoute(routeAgentOptions[0]?.id ?? "", editingAccountId ?? null),
+    ]);
+  }, [editingAccountId, routeAgentOptions]);
+
+  const handleUpdateFeishuRoute = useCallback((
+    index: number,
+    patch: Partial<FeishuMultiAgentRoute>,
+  ) => {
+    setRoutesError("");
+    setRoutesHint("");
+    setFeishuRoutes((prev) => prev.map((route, routeIndex) => {
+      if (routeIndex !== index) {
+        return route;
+      }
+
+      const next = normalizeFeishuRoute({ ...route, ...patch });
+      if (next.scope === "account") {
+        next.peerId = "";
+      }
+      return next;
+    }));
+  }, []);
+
+  const handleMoveFeishuRoute = useCallback((index: number, direction: -1 | 1) => {
+    setRoutesError("");
+    setRoutesHint("");
+    setFeishuRoutes((prev) => {
+      const nextIndex = index + direction;
+      if (nextIndex < 0 || nextIndex >= prev.length) {
+        return prev;
+      }
+
+      const next = [...prev];
+      const [current] = next.splice(index, 1);
+      next.splice(nextIndex, 0, current);
+      return next;
+    });
+  }, []);
+
+  const handleRemoveFeishuRoute = useCallback((index: number) => {
+    setRoutesError("");
+    setRoutesHint("");
+    setFeishuRoutes((prev) => prev.filter((_, routeIndex) => routeIndex !== index));
+  }, []);
+
+  const handleSaveFeishuRoutes = useCallback(async () => {
+    const normalizedRoutes = feishuRoutes.map((route) => normalizeFeishuRoute(route));
+
+    if (normalizedRoutes.some((route) => !route.agentId.trim())) {
+      setRoutesError("每条路由都需要选择一个 Agent");
+      return;
+    }
+
+    const missingPeerRoute = normalizedRoutes.find((route) => route.scope !== "account" && !route.peerId?.trim());
+    if (missingPeerRoute) {
+      setRoutesError(missingPeerRoute.scope === "group" ? "群组路由需要填写群组 ID" : "私聊路由需要填写用户 Open ID");
+      return;
+    }
+
+    setRoutesSaving(true);
+    setRoutesError("");
+    setRoutesHint("");
+
+    try {
+      const result: CommandResult = await invoke("save_feishu_multi_agent_bindings", {
+        routes: normalizedRoutes.map((route) => ({
+          agentId: route.agentId.trim(),
+          scope: route.scope,
+          accountId: route.accountId?.trim() ? route.accountId.trim() : null,
+          peerId: route.scope === "account" ? null : (route.peerId?.trim() || null),
+        })),
+      });
+
+      if (!result.success) {
+        setRoutesError(result.stderr || "飞书多 Agent 路由保存失败");
+        return;
+      }
+
+      setRoutesHint(result.stdout || "飞书多 Agent 路由已保存");
+      await Promise.all([
+        loadFeishuMultiAgentBindings(),
+        refreshAll({ silent: true }),
+      ]);
+    } catch (e) {
+      setRoutesError(`${e}`);
+    } finally {
+      setRoutesSaving(false);
+    }
+  }, [feishuRoutes, loadFeishuMultiAgentBindings, refreshAll]);
 
   useEffect(() => {
     if (bindingPhase !== "waiting" || !authSession) {
@@ -1159,7 +1405,7 @@ export default function ChannelsPage() {
                     </div>
                   </div>
                 </div>
-                <Button size="sm" variant="ghost" onClick={closeDialog} disabled={installPhase === "running" || bindingPhase === "finalizing" || existingBinding}>
+                <Button size="sm" variant="ghost" onClick={closeDialog} disabled={installPhase === "running" || bindingPhase === "finalizing" || existingBinding || routesSaving}>
                   关闭
                 </Button>
               </div>
@@ -1266,231 +1512,466 @@ export default function ChannelsPage() {
                   )}
 
                   {(setupStep === "bind" || setupStep === "done") && (
-                    <div className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
-                      <Card className="border-white/[0.08] bg-white/[0.02]">
-                        <CardContent className="space-y-4 p-4">
-                          <div className="space-y-1">
-                            <h4 className="text-[14px] font-semibold">
-                              {setupStep === "done" ? "飞书已接入" : "绑定飞书机器人"}
-                            </h4>
-                            <p className="text-[12px] text-muted-foreground">
-                              {setupStep === "done"
-                                ? "官方飞书插件已经可用。如果你想更换绑定，可以重新扫码创建新机器人，或切换到已有机器人。"
-                                : "这里支持两种接入方式：扫码创建新机器人，或输入已有机器人的 App ID / App Secret。"}
-                            </p>
-                          </div>
+                    <div className="space-y-4">
+                      <div className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
+                        <Card className="border-white/[0.08] bg-white/[0.02]">
+                          <CardContent className="space-y-4 p-4">
+                            <div className="space-y-1">
+                              <h4 className="text-[14px] font-semibold">
+                                {setupStep === "done" ? "飞书已接入" : "绑定飞书机器人"}
+                              </h4>
+                              <p className="text-[12px] text-muted-foreground">
+                                {setupStep === "done"
+                                  ? "官方飞书插件已经可用。如果你想更换绑定，可以重新扫码创建新机器人，或切换到已有机器人。"
+                                  : "这里支持两种接入方式：扫码创建新机器人，或输入已有机器人的 App ID / App Secret。"}
+                              </p>
+                            </div>
 
-                          {feishuStatus?.channelConfigured && setupStep === "done" && (
-                            <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/8 p-3">
-                              <div className="flex items-start gap-2">
-                                <CheckCircle2 size={16} className="mt-0.5 text-emerald-300" />
-                                <div className="text-[12px] text-emerald-100/90">
-                                  <p>当前已绑定 {feishuStatus.displayName || "飞书官方插件"}。</p>
-                                  <p className="mt-1 text-emerald-100/70">App ID: {feishuStatus.appId || "已写入配置"}，环境: {feishuStatus.domain === "lark" ? "Lark" : "飞书"}</p>
+                            {feishuStatus?.channelConfigured && setupStep === "done" && (
+                              <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/8 p-3">
+                                <div className="flex items-start gap-2">
+                                  <CheckCircle2 size={16} className="mt-0.5 text-emerald-300" />
+                                  <div className="text-[12px] text-emerald-100/90">
+                                    <p>当前已绑定 {feishuStatus.displayName || "飞书官方插件"}。</p>
+                                    <p className="mt-1 text-emerald-100/70">App ID: {feishuStatus.appId || "已写入配置"}，环境: {feishuStatus.domain === "lark" ? "Lark" : "飞书"}</p>
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          )}
+                            )}
 
-                          <div className="grid gap-4 xl:grid-cols-2">
-                            <Card className="border-white/[0.06] bg-white/[0.03]">
-                              <CardContent className="space-y-4 p-4">
-                                <div className="space-y-1">
-                                  <h5 className="text-[13px] font-semibold">扫码创建新机器人</h5>
-                                  <p className="text-[12px] text-muted-foreground">
-                                    应用内生成二维码，用飞书扫一扫后自动写入配置。
-                                  </p>
-                                </div>
+                            <div className="grid gap-4 xl:grid-cols-2">
+                              <Card className="border-white/[0.06] bg-white/[0.03]">
+                                <CardContent className="space-y-4 p-4">
+                                  <div className="space-y-1">
+                                    <h5 className="text-[13px] font-semibold">扫码创建新机器人</h5>
+                                    <p className="text-[12px] text-muted-foreground">
+                                      应用内生成二维码，用飞书扫一扫后自动写入配置。
+                                    </p>
+                                  </div>
 
-                                {bindingPhase === "waiting" && authQrDataUrl ? (
+                                  {bindingPhase === "waiting" && authQrDataUrl ? (
+                                    <div className="space-y-3">
+                                      <div className="rounded-2xl border border-sky-500/15 bg-sky-500/8 p-5 text-center">
+                                        <img src={authQrDataUrl} alt="飞书扫码二维码" className="mx-auto h-56 w-56 rounded-xl bg-white p-3" />
+                                        <p className="mt-3 text-[13px] font-medium text-sky-50">请用飞书扫一扫</p>
+                                        <p className="mt-1 text-[12px] text-sky-100/75">{bindingHint}</p>
+                                      </div>
+                                      <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
+                                        <p>二维码有效期约 {authSession ? formatRemainingSeconds(authSession.expireInSeconds) : "--"}，授权完成后这里会自动继续。</p>
+                                        <p className="mt-1">如果扫码后暂时没有变化，可以等待几秒，或者重新生成二维码。</p>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-4 text-[12px] text-muted-foreground">
+                                      <p>{bindingHint || "准备好后点击下方按钮生成二维码。"}</p>
+                                    </div>
+                                  )}
+
+                                  <div className="flex flex-wrap gap-2">
+                                    <Button
+                                      size="sm"
+                                      onClick={() => void beginFeishuBinding()}
+                                      disabled={bindingPhase === "waiting" || bindingPhase === "finalizing" || existingBinding || installPhase === "running"}
+                                    >
+                                      {bindingPhase === "finalizing" ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
+                                      {bindingPhase === "waiting" ? "等待扫码中..." : bindingPhase === "finalizing" ? "写入配置中..." : feishuStatus?.channelConfigured ? "重新扫码创建" : "开始扫码创建"}
+                                    </Button>
+                                    {bindingPhase === "waiting" && (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => {
+                                          setAuthSession(null);
+                                          setAuthQrDataUrl("");
+                                          setBindingPhase("idle");
+                                          setBindingError("");
+                                          setBindingHint("已取消本次扫码。你可以重新生成二维码，或改用已有机器人绑定。");
+                                        }}
+                                        disabled={existingBinding}
+                                      >
+                                        取消扫码
+                                      </Button>
+                                    )}
+                                  </div>
+                                </CardContent>
+                              </Card>
+
+                              <Card className="border-white/[0.06] bg-white/[0.03]">
+                                <CardContent className="space-y-4 p-4">
+                                  <div className="space-y-1">
+                                    <h5 className="text-[13px] font-semibold">绑定已有机器人</h5>
+                                    <p className="text-[12px] text-muted-foreground">
+                                      直接输入已创建机器人的 App ID 和 App Secret，无需重新扫码创建。
+                                    </p>
+                                  </div>
+
                                   <div className="space-y-3">
-                                    <div className="rounded-2xl border border-sky-500/15 bg-sky-500/8 p-5 text-center">
-                                      <img src={authQrDataUrl} alt="飞书扫码二维码" className="mx-auto h-56 w-56 rounded-xl bg-white p-3" />
-                                      <p className="mt-3 text-[13px] font-medium text-sky-50">请用飞书扫一扫</p>
-                                      <p className="mt-1 text-[12px] text-sky-100/75">{bindingHint}</p>
+                                    <div className="space-y-1">
+                                      <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">域名环境</label>
+                                      <div className="grid grid-cols-2 gap-2">
+                                        <Button
+                                          type="button"
+                                          size="sm"
+                                          variant="outline"
+                                          className={existingBindingForm.domain === "feishu"
+                                            ? "border-sky-400/40 bg-sky-500/15 text-sky-50 hover:bg-sky-500/20 hover:text-sky-50"
+                                            : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:bg-white/[0.04]"}
+                                          onClick={() => setExistingBindingForm((prev) => ({ ...prev, domain: "feishu" }))}
+                                          disabled={existingBinding || bindingPhase === "finalizing"}
+                                        >
+                                          飞书
+                                        </Button>
+                                        <Button
+                                          type="button"
+                                          size="sm"
+                                          variant="outline"
+                                          className={existingBindingForm.domain === "lark"
+                                            ? "border-sky-400/40 bg-sky-500/15 text-sky-50 hover:bg-sky-500/20 hover:text-sky-50"
+                                            : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:bg-white/[0.04]"}
+                                          onClick={() => setExistingBindingForm((prev) => ({ ...prev, domain: "lark" }))}
+                                          disabled={existingBinding || bindingPhase === "finalizing"}
+                                        >
+                                          Lark
+                                        </Button>
+                                      </div>
                                     </div>
-                                    <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
-                                      <p>二维码有效期约 {authSession ? formatRemainingSeconds(authSession.expireInSeconds) : "--"}，授权完成后这里会自动继续。</p>
-                                      <p className="mt-1">如果扫码后暂时没有变化，可以等待几秒，或者重新生成二维码。</p>
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-4 text-[12px] text-muted-foreground">
-                                    <p>{bindingHint || "准备好后点击下方按钮生成二维码。"}</p>
-                                  </div>
-                                )}
 
-                                <div className="flex flex-wrap gap-2">
-                                  <Button
-                                    size="sm"
-                                    onClick={() => void beginFeishuBinding()}
-                                    disabled={bindingPhase === "waiting" || bindingPhase === "finalizing" || existingBinding || installPhase === "running"}
-                                  >
-                                    {bindingPhase === "finalizing" ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
-                                    {bindingPhase === "waiting" ? "等待扫码中..." : bindingPhase === "finalizing" ? "写入配置中..." : feishuStatus?.channelConfigured ? "重新扫码创建" : "开始扫码创建"}
-                                  </Button>
-                                  {bindingPhase === "waiting" && (
+                                    <div className="space-y-1">
+                                      <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">App ID</label>
+                                      <input
+                                        className={inputCls}
+                                        placeholder="cli_xxx"
+                                        value={existingBindingForm.appId}
+                                        onChange={(event) => setExistingBindingForm((prev) => ({ ...prev, appId: event.target.value }))}
+                                        disabled={existingBinding || bindingPhase === "finalizing"}
+                                        autoCapitalize="off"
+                                        autoComplete="off"
+                                        spellCheck={false}
+                                      />
+                                    </div>
+
+                                    <div className="space-y-1">
+                                      <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">App Secret</label>
+                                      <input
+                                        type="password"
+                                        className={inputCls}
+                                        placeholder="填写已有机器人的 App Secret"
+                                        value={existingBindingForm.appSecret}
+                                        onChange={(event) => setExistingBindingForm((prev) => ({ ...prev, appSecret: event.target.value }))}
+                                        disabled={existingBinding || bindingPhase === "finalizing"}
+                                        autoCapitalize="off"
+                                        autoComplete="off"
+                                        spellCheck={false}
+                                      />
+                                    </div>
+                                  </div>
+
+                                  <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
+                                    <p>如果你之前已经在飞书开放平台建好了机器人，这里直接填入凭证即可，不需要重新走扫码创建。</p>
+                                  </div>
+
+                                  <div className="flex flex-wrap gap-2">
+                                    <Button
+                                      size="sm"
+                                      onClick={() => void handleBindExistingFeishu()}
+                                      disabled={existingBinding || bindingPhase === "finalizing" || installPhase === "running" || !existingBindingForm.appId.trim() || !existingBindingForm.appSecret.trim()}
+                                    >
+                                      {existingBinding ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={14} />}
+                                      {existingBinding ? "绑定中..." : feishuStatus?.channelConfigured ? "保存并改绑" : "保存并绑定"}
+                                    </Button>
                                     <Button
                                       size="sm"
                                       variant="outline"
-                                      onClick={() => {
-                                        setAuthSession(null);
-                                        setAuthQrDataUrl("");
-                                        setBindingPhase("idle");
-                                        setBindingError("");
-                                        setBindingHint("已取消本次扫码。你可以重新生成二维码，或改用已有机器人绑定。");
-                                      }}
-                                      disabled={existingBinding}
+                                      onClick={() => setExistingBindingForm((prev) => ({ ...prev, appSecret: "" }))}
+                                      disabled={existingBinding || bindingPhase === "finalizing" || !existingBindingForm.appSecret}
                                     >
-                                      取消扫码
+                                      清空密钥
                                     </Button>
-                                  )}
-                                </div>
-                              </CardContent>
-                            </Card>
-
-                            <Card className="border-white/[0.06] bg-white/[0.03]">
-                              <CardContent className="space-y-4 p-4">
-                                <div className="space-y-1">
-                                  <h5 className="text-[13px] font-semibold">绑定已有机器人</h5>
-                                  <p className="text-[12px] text-muted-foreground">
-                                    直接输入已创建机器人的 App ID 和 App Secret，无需重新扫码创建。
-                                  </p>
-                                </div>
-
-                                <div className="space-y-3">
-                                  <div className="space-y-1">
-                                    <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">域名环境</label>
-                                    <div className="grid grid-cols-2 gap-2">
-                                      <Button
-                                        type="button"
-                                        size="sm"
-                                        variant="outline"
-                                        className={existingBindingForm.domain === "feishu"
-                                          ? "border-sky-400/40 bg-sky-500/15 text-sky-50 hover:bg-sky-500/20 hover:text-sky-50"
-                                          : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:bg-white/[0.04]"}
-                                        onClick={() => setExistingBindingForm((prev) => ({ ...prev, domain: "feishu" }))}
-                                        disabled={existingBinding || bindingPhase === "finalizing"}
-                                      >
-                                        飞书
-                                      </Button>
-                                      <Button
-                                        type="button"
-                                        size="sm"
-                                        variant="outline"
-                                        className={existingBindingForm.domain === "lark"
-                                          ? "border-sky-400/40 bg-sky-500/15 text-sky-50 hover:bg-sky-500/20 hover:text-sky-50"
-                                          : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:bg-white/[0.04]"}
-                                        onClick={() => setExistingBindingForm((prev) => ({ ...prev, domain: "lark" }))}
-                                        disabled={existingBinding || bindingPhase === "finalizing"}
-                                      >
-                                        Lark
-                                      </Button>
-                                    </div>
                                   </div>
+                                </CardContent>
+                              </Card>
+                            </div>
 
-                                  <div className="space-y-1">
-                                    <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">App ID</label>
-                                    <input
-                                      className={inputCls}
-                                      placeholder="cli_xxx"
-                                      value={existingBindingForm.appId}
-                                      onChange={(event) => setExistingBindingForm((prev) => ({ ...prev, appId: event.target.value }))}
-                                      disabled={existingBinding || bindingPhase === "finalizing"}
-                                      autoCapitalize="off"
-                                      autoComplete="off"
-                                      spellCheck={false}
-                                    />
-                                  </div>
+                            <div className="flex flex-wrap gap-2">
+                              <Button size="sm" variant="outline" onClick={() => void refreshAll()} disabled={bindingPhase === "finalizing" || existingBinding}>
+                                <RefreshCw size={14} />
+                                刷新频道列表
+                              </Button>
+                            </div>
+                          </CardContent>
+                        </Card>
 
-                                  <div className="space-y-1">
-                                    <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">App Secret</label>
-                                    <input
-                                      type="password"
-                                      className={inputCls}
-                                      placeholder="填写已有机器人的 App Secret"
-                                      value={existingBindingForm.appSecret}
-                                      onChange={(event) => setExistingBindingForm((prev) => ({ ...prev, appSecret: event.target.value }))}
-                                      disabled={existingBinding || bindingPhase === "finalizing"}
-                                      autoCapitalize="off"
-                                      autoComplete="off"
-                                      spellCheck={false}
-                                    />
-                                  </div>
+                        <Card className="border-white/[0.08] bg-white/[0.02]">
+                          <CardContent className="space-y-4 p-4">
+                            <div className="space-y-1">
+                              <h4 className="text-[13px] font-semibold">当前状态</h4>
+                              <p className="text-[12px] text-muted-foreground">这里会根据插件检测、安装和扫码结果实时更新。</p>
+                            </div>
+
+                            <div className="space-y-3 text-[12px]">
+                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                                <p className="text-muted-foreground">官方插件</p>
+                                <p className="mt-1 font-medium text-foreground">{feishuStatus?.officialPluginInstalled ? "已安装" : "未安装"}</p>
+                              </div>
+                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                                <p className="text-muted-foreground">官方插件状态</p>
+                                <p className="mt-1 font-medium text-foreground">{feishuStatus?.officialPluginEnabled ? "已启用" : "待启用"}</p>
+                              </div>
+                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                                <p className="text-muted-foreground">机器人绑定</p>
+                                <p className="mt-1 font-medium text-foreground">
+                                  {existingBinding
+                                    ? "校验已有机器人"
+                                    : bindingPhase === "done"
+                                      ? "已完成"
+                                      : bindingPhase === "finalizing"
+                                        ? "写入配置中"
+                                        : bindingPhase === "waiting"
+                                          ? "等待扫码"
+                                          : feishuStatus?.channelConfigured
+                                            ? "已配置，可重新扫码"
+                                            : "尚未开始"}
+                                </p>
+                              </div>
+                              {feishuStatus?.communityPluginEnabled && (
+                                <div className="rounded-xl border border-amber-500/15 bg-amber-500/8 p-3 text-amber-100/85">
+                                  检测到旧的社区飞书插件仍配置为启用状态。应用内绑定会自动优先启用官方插件。
                                 </div>
-
-                                <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
-                                  <p>如果你之前已经在飞书开放平台建好了机器人，这里直接填入凭证即可，不需要重新走扫码创建。</p>
-                                </div>
-
-                                <div className="flex flex-wrap gap-2">
-                                  <Button
-                                    size="sm"
-                                    onClick={() => void handleBindExistingFeishu()}
-                                    disabled={existingBinding || bindingPhase === "finalizing" || installPhase === "running" || !existingBindingForm.appId.trim() || !existingBindingForm.appSecret.trim()}
-                                  >
-                                    {existingBinding ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={14} />}
-                                    {existingBinding ? "绑定中..." : feishuStatus?.channelConfigured ? "保存并改绑" : "保存并绑定"}
-                                  </Button>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={() => setExistingBindingForm((prev) => ({ ...prev, appSecret: "" }))}
-                                    disabled={existingBinding || bindingPhase === "finalizing" || !existingBindingForm.appSecret}
-                                  >
-                                    清空密钥
-                                  </Button>
-                                </div>
-                              </CardContent>
-                            </Card>
-                          </div>
-
-                          <div className="flex flex-wrap gap-2">
-                            <Button size="sm" variant="outline" onClick={() => void refreshAll()} disabled={bindingPhase === "finalizing" || existingBinding}>
-                              <RefreshCw size={14} />
-                              刷新频道列表
-                            </Button>
-                          </div>
-                        </CardContent>
-                      </Card>
+                              )}
+                            </div>
+                          </CardContent>
+                        </Card>
+                      </div>
 
                       <Card className="border-white/[0.08] bg-white/[0.02]">
                         <CardContent className="space-y-4 p-4">
-                          <div className="space-y-1">
-                            <h4 className="text-[13px] font-semibold">当前状态</h4>
-                            <p className="text-[12px] text-muted-foreground">这里会根据插件检测、安装和扫码结果实时更新。</p>
+                          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/10">
+                                  <Route size={15} className="text-sky-300" />
+                                </div>
+                                <div>
+                                  <h4 className="text-[13px] font-semibold">多 Agent 路由</h4>
+                                  <p className="text-[12px] text-muted-foreground">
+                                    按官方 `bindings` 规则，把飞书不同账号、私聊用户或群组定向到不同 Agent。
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void loadFeishuMultiAgentBindings()}
+                                disabled={routesLoading || routesSaving || existingBinding || bindingPhase === "finalizing"}
+                              >
+                                {routesLoading ? <Loader2 className="animate-spin" /> : <RefreshCw size={14} />}
+                                重新读取
+                              </Button>
+                              <Button
+                                size="sm"
+                                onClick={handleAddFeishuRoute}
+                                disabled={routesLoading || routesSaving || routeAgentOptions.length === 0}
+                              >
+                                <Plus size={14} />
+                                新增规则
+                              </Button>
+                            </div>
                           </div>
 
-                          <div className="space-y-3 text-[12px]">
-                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
-                              <p className="text-muted-foreground">官方插件</p>
-                              <p className="mt-1 font-medium text-foreground">{feishuStatus?.officialPluginInstalled ? "已安装" : "未安装"}</p>
+                          {(routesError || routesHint) && (
+                            <div className={`rounded-lg px-3 py-2.5 text-[12px] ${routesError
+                              ? "border border-red-500/20 bg-red-500/8 text-red-300"
+                              : "border border-emerald-500/15 bg-emerald-500/8 text-emerald-100/85"}`}
+                            >
+                              {routesError || routesHint}
                             </div>
-                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
-                              <p className="text-muted-foreground">官方插件状态</p>
-                              <p className="mt-1 font-medium text-foreground">{feishuStatus?.officialPluginEnabled ? "已启用" : "待启用"}</p>
+                          )}
+
+                          <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
+                            <p>优先级从高到低是：精确私聊/群组 ID、账号级路由、全部账号回退、默认 Agent。</p>
+                            <p className="mt-1">如果两条规则属于同一优先级，OpenClaw 会按这里的顺序命中；可以用上下箭头调整。</p>
+                          </div>
+
+                          {routesLoading ? (
+                            <div className="flex items-center justify-center py-10 text-muted-foreground">
+                              <Loader2 size={16} className="mr-2 animate-spin" />
+                              <span className="text-[12px]">正在读取飞书多 Agent 路由...</span>
                             </div>
-                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
-                              <p className="text-muted-foreground">机器人绑定</p>
-                              <p className="mt-1 font-medium text-foreground">
-                                {existingBinding
-                                  ? "校验已有机器人"
-                                  : bindingPhase === "done"
-                                  ? "已完成"
-                                  : bindingPhase === "finalizing"
-                                    ? "写入配置中"
-                                      : bindingPhase === "waiting"
-                                      ? "等待扫码"
-                                      : feishuStatus?.channelConfigured
-                                        ? "已配置，可重新扫码"
-                                        : "尚未开始"}
-                              </p>
+                          ) : routeAgentOptions.length === 0 ? (
+                            <div className="rounded-xl border border-amber-500/15 bg-amber-500/8 p-4 text-[12px] text-amber-100/85">
+                              还没有可选的 Agent。请先在 Agents 页面创建至少一个 Agent，再回来设置飞书路由。
                             </div>
-                            {feishuStatus?.communityPluginEnabled && (
-                              <div className="rounded-xl border border-amber-500/15 bg-amber-500/8 p-3 text-amber-100/85">
-                                检测到旧的社区飞书插件仍配置为启用状态。应用内绑定会自动优先启用官方插件。
-                              </div>
-                            )}
+                          ) : feishuRoutes.length === 0 ? (
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-4 text-[12px] text-muted-foreground">
+                              当前还没有飞书多 Agent 路由。你可以先加一条账号级规则，或者直接按用户 Open ID / 群组 ID 做精确分流。
+                            </div>
+                          ) : (
+                            <div className="space-y-3">
+                              {feishuRoutes.map((route, index) => {
+                                const resolvedAccountValue = route.accountId?.trim() ? route.accountId.trim() : FEISHU_DEFAULT_ACCOUNT_SCOPE;
+                                const peerPlaceholder = route.scope === "group" ? "oc_xxx 群组 ID" : "ou_xxx 用户 Open ID";
+
+                                return (
+                                  <Card
+                                    key={`${index}-${route.agentId}-${route.scope}-${route.accountId ?? ""}-${route.peerId ?? ""}`}
+                                    className="border-white/[0.06] bg-white/[0.03]"
+                                  >
+                                    <CardContent className="space-y-4 p-4">
+                                      <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                          <Badge variant="secondary" className="border-0 bg-sky-500/10 text-sky-200">
+                                            规则 {index + 1}
+                                          </Badge>
+                                          <span className="text-[11px] text-muted-foreground">
+                                            {route.scope === "account" ? "账号级路由" : route.scope === "group" ? "群组精确路由" : "私聊精确路由"}
+                                          </span>
+                                        </div>
+
+                                        <div className="flex items-center gap-1">
+                                          <Button
+                                            size="icon"
+                                            variant="ghost"
+                                            className="h-7 w-7"
+                                            onClick={() => handleMoveFeishuRoute(index, -1)}
+                                            disabled={routesSaving || index === 0}
+                                          >
+                                            <ChevronUp size={13} />
+                                          </Button>
+                                          <Button
+                                            size="icon"
+                                            variant="ghost"
+                                            className="h-7 w-7"
+                                            onClick={() => handleMoveFeishuRoute(index, 1)}
+                                            disabled={routesSaving || index === feishuRoutes.length - 1}
+                                          >
+                                            <ChevronDown size={13} />
+                                          </Button>
+                                          <Button
+                                            size="icon"
+                                            variant="ghost"
+                                            className="h-7 w-7 text-muted-foreground hover:text-red-400"
+                                            onClick={() => handleRemoveFeishuRoute(index)}
+                                            disabled={routesSaving}
+                                          >
+                                            <Trash2 size={13} />
+                                          </Button>
+                                        </div>
+                                      </div>
+
+                                      <div className="grid gap-3 xl:grid-cols-2">
+                                        <div className="space-y-1">
+                                          <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">Agent</label>
+                                          <div className="relative">
+                                            <Bot size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                                            <select
+                                              className={`${inputCls} appearance-none pl-9`}
+                                              value={route.agentId}
+                                              onChange={(event) => handleUpdateFeishuRoute(index, { agentId: event.target.value })}
+                                              disabled={routesSaving}
+                                            >
+                                              <option value="">选择 Agent</option>
+                                              {routeAgentOptions.map((agent) => (
+                                                <option key={agent.id} value={agent.id}>{agent.label}</option>
+                                              ))}
+                                            </select>
+                                          </div>
+                                        </div>
+
+                                        <div className="space-y-1">
+                                          <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">账号范围</label>
+                                          <select
+                                            className={`${inputCls} appearance-none`}
+                                            value={resolvedAccountValue}
+                                            onChange={(event) => handleUpdateFeishuRoute(index, {
+                                              accountId: event.target.value === FEISHU_DEFAULT_ACCOUNT_SCOPE ? null : event.target.value,
+                                            })}
+                                            disabled={routesSaving}
+                                          >
+                                            <option value={FEISHU_DEFAULT_ACCOUNT_SCOPE}>默认账号 ({feishuDefaultAccountId})</option>
+                                            <option value="*">全部账号</option>
+                                            {routeAccountOptions.map((account) => (
+                                              <option key={account.id} value={account.id}>{account.label}</option>
+                                            ))}
+                                          </select>
+                                        </div>
+                                      </div>
+
+                                      <div className="space-y-2">
+                                        <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">匹配方式</label>
+                                        <div className="grid grid-cols-3 gap-2">
+                                          {([
+                                            { value: "account", label: "账号" },
+                                            { value: "direct", label: "私聊" },
+                                            { value: "group", label: "群组" },
+                                          ] as Array<{ value: FeishuRouteScope; label: string }>).map((item) => (
+                                            <Button
+                                              key={item.value}
+                                              type="button"
+                                              size="sm"
+                                              variant="outline"
+                                              className={route.scope === item.value
+                                                ? "border-sky-400/40 bg-sky-500/15 text-sky-50 hover:bg-sky-500/20 hover:text-sky-50"
+                                                : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:bg-white/[0.04]"}
+                                              onClick={() => handleUpdateFeishuRoute(index, { scope: item.value })}
+                                              disabled={routesSaving}
+                                            >
+                                              {item.label}
+                                            </Button>
+                                          ))}
+                                        </div>
+                                      </div>
+
+                                      {route.scope !== "account" && (
+                                        <div className="space-y-1">
+                                          <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+                                            {route.scope === "group" ? "群组 ID" : "用户 Open ID"}
+                                          </label>
+                                          <input
+                                            className={inputCls}
+                                            placeholder={peerPlaceholder}
+                                            value={route.peerId ?? ""}
+                                            onChange={(event) => handleUpdateFeishuRoute(index, { peerId: event.target.value })}
+                                            disabled={routesSaving}
+                                            autoCapitalize="off"
+                                            autoComplete="off"
+                                            spellCheck={false}
+                                          />
+                                          <p className="text-[11px] text-muted-foreground">
+                                            {route.scope === "group" ? "飞书群组 ID 一般形如 `oc_xxx`。" : "飞书用户 Open ID 一般形如 `ou_xxx`。"}
+                                          </p>
+                                        </div>
+                                      )}
+                                    </CardContent>
+                                  </Card>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              size="sm"
+                              onClick={() => void handleSaveFeishuRoutes()}
+                              disabled={routesSaving || routesLoading || routeAgentOptions.length === 0}
+                            >
+                              {routesSaving ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={14} />}
+                              {routesSaving ? "保存中..." : "保存多 Agent 路由"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setRoutesError("");
+                                setRoutesHint("");
+                                setFeishuRoutes([]);
+                              }}
+                              disabled={routesSaving || routesLoading || feishuRoutes.length === 0}
+                            >
+                              清空当前列表
+                            </Button>
                           </div>
                         </CardContent>
                       </Card>
