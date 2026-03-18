@@ -80,6 +80,12 @@ interface ExistingFeishuBindingForm {
   domain: "feishu" | "lark";
 }
 
+interface PendingRemoval {
+  channel: string;
+  account: string;
+  label: string;
+}
+
 interface FeishuAccountBindingSummary {
   accountId: string;
   displayName: string;
@@ -508,6 +514,8 @@ export default function ChannelsPage() {
   const [checkingStatus, setCheckingStatus] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [pendingRemoval, setPendingRemoval] = useState<PendingRemoval | null>(null);
+  const [removeError, setRemoveError] = useState("");
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
@@ -789,6 +797,26 @@ export default function ChannelsPage() {
     ]);
   }, [editingAccountId, fetchChannels, fetchStatus, loadFeishuBindingCatalog]);
 
+  const refreshFeishuDisplayNames = useCallback(async (accountId?: string | null) => {
+    try {
+      const result: CommandResult = await invoke("refresh_feishu_channel_display_names", {
+        accountId: accountId?.trim() || null,
+      });
+      if (!result.success) {
+        return false;
+      }
+
+      if (/已刷新\s+\d+\s+个飞书频道名称/.test(result.stdout)) {
+        await refreshAll({ silent: true });
+        return true;
+      }
+    } catch {
+      // Best effort only.
+    }
+
+    return false;
+  }, [refreshAll]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -819,6 +847,7 @@ export default function ChannelsPage() {
       }
 
       void refreshAll({ silent: true });
+      void refreshFeishuDisplayNames();
     };
 
     void bootstrap();
@@ -826,7 +855,7 @@ export default function ChannelsPage() {
     return () => {
       cancelled = true;
     };
-  }, [refreshAll]);
+  }, [refreshAll, refreshFeishuDisplayNames]);
 
   const getStatus = useCallback((channel: string, account: string) => (
     statuses.find((entry) => entry.channel === channel && (entry.account === account || entry.account === "default"))
@@ -921,12 +950,13 @@ export default function ChannelsPage() {
           loadFeishuBindingCatalog(next.accountId),
           loadFeishuChannelConfig(next.accountId),
           refreshAll({ silent: true }),
+          refreshFeishuDisplayNames(next.accountId),
         ]);
       } catch {
         // Keep the optimistic UI if background status sync fails.
       }
     })();
-  }, [loadFeishuBindingCatalog, loadFeishuChannelConfig, loadFeishuSetup, refreshAll]);
+  }, [loadFeishuBindingCatalog, loadFeishuChannelConfig, loadFeishuSetup, refreshAll, refreshFeishuDisplayNames]);
 
   const beginFeishuBinding = useCallback(async () => {
     setSetupError("");
@@ -987,7 +1017,8 @@ export default function ChannelsPage() {
       loadFeishuBindingCatalog(targetAccountId),
       loadFeishuChannelConfig(targetAccountId),
     ]);
-  }, [loadFeishuBindingCatalog, loadFeishuChannelConfig, loadFeishuSetup, resetFeishuDialogState]);
+    void refreshFeishuDisplayNames(targetAccountId);
+  }, [loadFeishuBindingCatalog, loadFeishuChannelConfig, loadFeishuSetup, refreshFeishuDisplayNames, resetFeishuDialogState]);
 
   const closeDialog = useCallback(() => {
     if (installPhase === "running" || bindingPhase === "waiting" || bindingPhase === "finalizing" || existingBinding || unbindLoading) {
@@ -998,25 +1029,50 @@ export default function ChannelsPage() {
     resetFeishuDialogState();
   }, [bindingPhase, existingBinding, installPhase, resetFeishuDialogState, unbindLoading]);
 
-  const handleRemove = async (channel: string, account: string) => {
-    if (!confirm(`确定移除 ${getChannelInfo(channel).label} (${account}) 吗？`)) return;
+  const openRemoveDialog = useCallback((channel: string, account: string) => {
+    setRemoveError("");
+    setPendingRemoval({
+      channel,
+      account,
+      label: getChannelInfo(channel).label,
+    });
+  }, []);
+
+  const closeRemoveDialog = useCallback(() => {
+    if (removing) {
+      return;
+    }
+    setPendingRemoval(null);
+    setRemoveError("");
+  }, [removing]);
+
+  const handleRemove = useCallback(async () => {
+    if (!pendingRemoval) {
+      return;
+    }
+
+    const { channel, account } = pendingRemoval;
     const key = `${channel}:${account}`;
+    setRemoveError("");
     setRemoving(key);
+
     try {
       const result: CommandResult = await invoke("remove_channel", { channel, account });
       if (!result.success) {
-        alert(result.stderr || "移除频道失败");
+        setRemoveError(result.stderr || "移除频道失败");
         return;
       }
+
       setChannels((prev) => prev.filter((entry) => !(entry.channel === channel && entry.account === account)));
       setStatuses((prev) => prev.filter((entry) => !(entry.channel === channel && entry.account === account)));
+      setPendingRemoval(null);
       void refreshAll({ silent: true });
     } catch (e) {
-      alert(`移除频道失败: ${e}`);
+      setRemoveError(`移除频道失败: ${e}`);
     } finally {
       setRemoving(null);
     }
-  };
+  }, [pendingRemoval, refreshAll]);
 
   const handleUnbindFeishu = useCallback(async () => {
     const accountId = editingAccountId?.trim();
@@ -1416,7 +1472,7 @@ export default function ChannelsPage() {
                               variant="ghost"
                               size="icon"
                               className="h-7 w-7 text-muted-foreground opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
-                              onClick={() => void handleRemove(channel.channel, channel.account)}
+                              onClick={() => openRemoveDialog(channel.channel, channel.account)}
                               disabled={removing === key}
                             >
                               {removing === key ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
@@ -1911,6 +1967,42 @@ export default function ChannelsPage() {
                   )}
                 </>
               )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {pendingRemoval && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/75 px-4 backdrop-blur-sm" onClick={closeRemoveDialog}>
+          <Card className="w-full max-w-md border-white/[0.08] bg-[#081017] shadow-2xl shadow-black/40" onClick={(event) => event.stopPropagation()}>
+            <CardContent className="space-y-4 p-5">
+              <div className="space-y-1">
+                <h3 className="text-[14px] font-semibold">确认删除频道</h3>
+                <p className="text-[12px] text-muted-foreground">
+                  确定要移除 {pendingRemoval.label} 频道 `{pendingRemoval.account}` 吗？这个操作会删除当前频道配置。
+                </p>
+                {pendingRemoval.channel === "feishu" && (
+                  <p className="text-[12px] text-muted-foreground">
+                    如果你只是想更换 Agent，建议先进入“管理飞书接入”里解绑，而不是直接删除频道。
+                  </p>
+                )}
+              </div>
+
+              {removeError && (
+                <div className="rounded-lg border border-red-500/20 bg-red-500/8 px-3 py-2.5 text-[12px] text-red-300">
+                  {removeError}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2">
+                <Button size="sm" variant="outline" onClick={closeRemoveDialog} disabled={Boolean(removing)}>
+                  取消
+                </Button>
+                <Button size="sm" onClick={() => void handleRemove()} disabled={Boolean(removing)}>
+                  {removing ? <Loader2 className="animate-spin" /> : <Trash2 size={14} />}
+                  {removing ? "删除中..." : "确认删除"}
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </div>

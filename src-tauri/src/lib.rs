@@ -6524,12 +6524,21 @@ async fn validate_feishu_app_credentials(
     app_secret: &str,
     domain: &str,
 ) -> Result<bool, String> {
+    let token = fetch_feishu_tenant_access_token(app_id, app_secret, domain).await?;
+    Ok(!token.trim().is_empty())
+}
+
+async fn fetch_feishu_tenant_access_token(
+    app_id: &str,
+    app_secret: &str,
+    domain: &str,
+) -> Result<String, String> {
     let clean_app_id = app_id.trim();
     let clean_app_secret = app_secret.trim();
     let domain = normalize_feishu_domain(Some(domain));
 
     if clean_app_id.is_empty() || clean_app_secret.is_empty() {
-        return Ok(false);
+        return Ok(String::new());
     }
 
     let client = Client::builder()
@@ -6555,14 +6564,66 @@ async fn validate_feishu_app_credentials(
         .await
         .map_err(|error| format!("解析飞书 App 校验结果失败: {}", error))?;
 
-    let ok = payload.get("code").and_then(|value| value.as_i64()) == Some(0)
-        && payload
-            .get("tenant_access_token")
+    if payload.get("code").and_then(|value| value.as_i64()) != Some(0) {
+        let message = payload
+            .get("msg")
             .and_then(|value| value.as_str())
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("未知错误");
+        return Err(format!("飞书 App 凭证校验失败: {}", message));
+    }
 
-    Ok(ok)
+    Ok(payload
+        .get("tenant_access_token")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("")
+        .to_string())
+}
+
+async fn fetch_feishu_bot_display_name(
+    app_id: &str,
+    app_secret: &str,
+    domain: &str,
+) -> Result<Option<String>, String> {
+    let token = fetch_feishu_tenant_access_token(app_id, app_secret, domain).await?;
+    if token.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("创建飞书机器人信息请求失败: {}", error))?;
+
+    let response = client
+        .get(format!(
+            "{}/open-apis/bot/v3/info/",
+            feishu_open_platform_base_url(normalize_feishu_domain(Some(domain)))
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|error| format!("读取飞书机器人信息失败: {}", error))?;
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("解析飞书机器人信息失败: {}", error))?;
+
+    if payload.get("code").and_then(|value| value.as_i64()) != Some(0) {
+        return Ok(None);
+    }
+
+    Ok(payload
+        .get("bot")
+        .and_then(|value| value.get("app_name"))
+        .or_else(|| payload.get("app_name"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string()))
 }
 
 fn restart_gateway_in_background() {
@@ -6643,9 +6704,15 @@ async fn bind_existing_feishu_app(
         };
     }
 
+    let resolved_display_name = fetch_feishu_bot_display_name(&app_id, &app_secret, &domain)
+        .await
+        .ok()
+        .flatten()
+        .or(display_name.clone());
+
     if let Err(error) = save_feishu_channel_binding(
         &account_id,
-        display_name.as_deref(),
+        resolved_display_name.as_deref(),
         &app_id,
         &app_secret,
         &domain,
@@ -7120,7 +7187,7 @@ async fn poll_feishu_auth_session(
 }
 
 #[tauri::command]
-fn complete_feishu_plugin_binding(
+async fn complete_feishu_plugin_binding(
     app_id: String,
     app_secret: String,
     domain: Option<String>,
@@ -7175,9 +7242,15 @@ fn complete_feishu_plugin_binding(
         };
     }
 
+    let resolved_display_name = fetch_feishu_bot_display_name(&app_id, &app_secret, &domain)
+        .await
+        .ok()
+        .flatten()
+        .or(display_name.clone());
+
     if let Err(error) = save_feishu_channel_binding(
         &account_id,
-        display_name.as_deref(),
+        resolved_display_name.as_deref(),
         &app_id,
         &app_secret,
         &domain,
@@ -7200,6 +7273,115 @@ fn complete_feishu_plugin_binding(
             "飞书频道 {} 已绑定到 Agent {}，网关正在后台刷新",
             account_id, agent_id
         ),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+async fn refresh_feishu_channel_display_names(account_id: Option<String>) -> CommandResult {
+    let target_account_id = account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    materialize_feishu_root_account_if_needed(&mut config);
+
+    let Some(accounts) = config
+        .pointer("/channels/feishu/accounts")
+        .and_then(|value| value.as_object())
+        .cloned()
+    else {
+        return CommandResult {
+            success: true,
+            stdout: "当前没有可刷新的飞书频道".to_string(),
+            stderr: String::new(),
+            code: Some(0),
+        };
+    };
+
+    let mut updates = Vec::new();
+    for (current_account_id, account_value) in accounts {
+        if target_account_id
+            .as_deref()
+            .is_some_and(|value| value != current_account_id)
+        {
+            continue;
+        }
+
+        let Some(account) = account_value.as_object() else {
+            continue;
+        };
+        let app_id = account
+            .get("appId")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let app_secret = account
+            .get("appSecret")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let domain = account
+            .get("domain")
+            .and_then(|value| value.as_str())
+            .or_else(|| {
+                config
+                    .pointer("/channels/feishu/domain")
+                    .and_then(|value| value.as_str())
+            })
+            .unwrap_or("feishu");
+
+        let (Some(app_id), Some(app_secret)) = (app_id, app_secret) else {
+            continue;
+        };
+
+        let display_name = match fetch_feishu_bot_display_name(app_id, app_secret, domain).await {
+            Ok(Some(value)) => value,
+            _ => continue,
+        };
+
+        let current_name = account
+            .get("name")
+            .and_then(|value| value.as_str())
+            .or_else(|| account.get("botName").and_then(|value| value.as_str()))
+            .map(str::trim)
+            .unwrap_or("");
+
+        if current_name != display_name {
+            updates.push((current_account_id, display_name));
+        }
+    }
+
+    if updates.is_empty() {
+        return CommandResult {
+            success: true,
+            stdout: "飞书频道名称已经是最新的".to_string(),
+            stderr: String::new(),
+            code: Some(0),
+        };
+    }
+
+    for (current_account_id, display_name) in &updates {
+        config["channels"]["feishu"]["accounts"][current_account_id]["name"] =
+            serde_json::json!(display_name);
+        config["channels"]["feishu"]["accounts"][current_account_id]["botName"] =
+            serde_json::json!(display_name);
+    }
+
+    if let Err(error) = write_openclaw_config(&config) {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: error,
+            code: Some(1),
+        };
+    }
+
+    CommandResult {
+        success: true,
+        stdout: format!("已刷新 {} 个飞书频道名称", updates.len()),
         stderr: String::new(),
         code: Some(0),
     }
@@ -8311,6 +8493,7 @@ pub fn run() {
             start_feishu_auth_session,
             poll_feishu_auth_session,
             complete_feishu_plugin_binding,
+            refresh_feishu_channel_display_names,
             unbind_feishu_channel_account,
             list_channels,
             list_channels_snapshot,
