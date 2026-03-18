@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 import { Breadcrumb, BreadcrumbItem, BreadcrumbList, BreadcrumbPage } from "@/components/ui/breadcrumb";
+import { Badge } from "@/components/ui/badge";
 import { AppSidebar } from "@/components/app-sidebar";
 import LoadingScreen from "@/components/LoadingScreen";
 import DashboardContent from "@/components/DashboardContent";
@@ -137,33 +138,42 @@ export default function App() {
   };
 
   return (
-    <SidebarProvider>
-      <AppSidebar
-        mode={mode}
-        activeTab={dashboardTab}
-        onTabChange={setDashboardTab}
-        wizardStep={wizardStep}
-        onWizardNavigate={handleWizardNavigate}
-        completedSteps={completedSteps}
-        version={systemInfo?.openclaw_version ?? undefined}
-      />
-      <SidebarInset>
-        <div className="h-8 shrink-0 w-full" data-tauri-drag-region />
-        <header className="flex h-8 shrink-0 items-center gap-2 px-3" data-tauri-drag-region>
-          <SidebarTrigger className="-ml-1 text-muted-foreground hover:text-foreground" />
-          <Separator orientation="vertical" className="mr-2 h-4 bg-white/[0.06]" />
-          <Breadcrumb>
-            <BreadcrumbList>
-              <BreadcrumbItem>
-                <BreadcrumbPage className="text-[13px] text-muted-foreground">{pageTitle}</BreadcrumbPage>
-              </BreadcrumbItem>
-            </BreadcrumbList>
-          </Breadcrumb>
-        </header>
-        <div className="flex flex-1 flex-col overflow-hidden">
-          {renderContent()}
-        </div>
-      </SidebarInset>
-    </SidebarProvider>
+    <div className="h-full w-full overflow-hidden bg-background">
+      <SidebarProvider className="h-full min-h-0">
+        <AppSidebar
+          mode={mode}
+          activeTab={dashboardTab}
+          onTabChange={setDashboardTab}
+          wizardStep={wizardStep}
+          onWizardNavigate={handleWizardNavigate}
+          completedSteps={completedSteps}
+          version={systemInfo?.openclaw_version ?? undefined}
+        />
+        <SidebarInset className="min-h-0 overflow-hidden">
+          <div className="h-8 shrink-0 w-full border-b border-white/[0.05] bg-background/90 backdrop-blur-sm" data-tauri-drag-region />
+          <header className="flex h-11 shrink-0 items-center justify-between border-b border-white/[0.06] bg-background/95 px-3 backdrop-blur-sm">
+            <div className="flex min-w-0 items-center gap-2">
+              <SidebarTrigger className="-ml-1 text-muted-foreground hover:text-foreground" />
+              <Separator orientation="vertical" className="mr-1 h-4 bg-white/[0.06]" />
+              <Breadcrumb>
+                <BreadcrumbList>
+                  <BreadcrumbItem>
+                    <BreadcrumbPage className="truncate text-[13px] text-muted-foreground">{pageTitle}</BreadcrumbPage>
+                  </BreadcrumbItem>
+                </BreadcrumbList>
+              </Breadcrumb>
+            </div>
+            <Badge variant="outline" className="h-6 border-white/[0.08] bg-white/[0.03] px-2 text-[10px] text-muted-foreground">
+              {mode === "dashboard" ? "控制台" : "安装向导"}
+            </Badge>
+          </header>
+          <div className="flex min-h-0 flex-1 p-3">
+            <div className="flex min-h-0 w-full flex-1 overflow-hidden rounded-xl border border-white/[0.06] bg-card/70 shadow-lg shadow-black/10">
+              {renderContent()}
+            </div>
+          </div>
+        </SidebarInset>
+      </SidebarProvider>
+    </div>
   );
 }
