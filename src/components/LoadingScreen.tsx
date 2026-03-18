@@ -69,7 +69,7 @@ export default function LoadingScreen({ onResult }: LoadingScreenProps) {
 
   return (
     <div className="flex h-screen flex-col items-center justify-center bg-background">
-      <img src="/icon.png" alt="OpenClaw" className="mb-6 h-14 w-14 rounded-xl" />
+      <img src="/icon.png" alt="clawHelp" className="mb-6 h-14 w-14 rounded-xl" />
 
       <div className="w-72 rounded-xl border border-white/[0.06] bg-card p-4 shadow-lg shadow-black/10 space-y-2.5">
         {items.map((item, i) => (

@@ -1,6 +1,6 @@
-# OpenClaw Client
+# clawHelp
 
-跨平台 OpenClaw 管理客户端，基于 Tauri 2 + React 19 + TypeScript 构建。
+clawHelp 是跨平台 OpenClaw 管理客户端，基于 Tauri 2 + React 19 + TypeScript 构建。
 
 ## 技术栈
 
@@ -46,7 +46,7 @@ CI=false npm run tauri build
 ## 项目结构
 
 ```
-openclaw-client/
+clawhelp/
 ├── src/                          # React 前端
 │   ├── App.tsx                   # 主应用 (路由/布局)
 │   ├── main.tsx                  # 入口

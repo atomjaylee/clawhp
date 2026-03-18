@@ -65,9 +65,9 @@ export function AppSidebar({
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" className="cursor-default hover:bg-transparent">
-              <img src="/icon.png" alt="OpenClaw" className="size-7 rounded-lg" />
+              <img src="/icon.png" alt="clawHelp" className="size-7 rounded-lg" />
               <div className="grid flex-1 text-left text-[13px] leading-tight">
-                <span className="truncate font-semibold">OpenClaw</span>
+                <span className="truncate font-semibold">clawHelp</span>
                 <span className="truncate text-[11px] text-muted-foreground">
                   {mode === "wizard" ? "安装向导" : "控制面板"}
                 </span>
@@ -138,7 +138,7 @@ export function AppSidebar({
         <SidebarMenu>
           <SidebarMenuItem>
             <div className="px-2 py-1.5 text-xs text-muted-foreground">
-              OpenClaw Installer · v{appVersion ?? "未知"}
+              clawHelp · v{appVersion ?? "未知"}
             </div>
           </SidebarMenuItem>
         </SidebarMenu>

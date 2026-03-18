@@ -1,12 +1,12 @@
 [package]
-name = "openclaw-client"
+name = "clawhelp"
 version = "1.2.0"
-description = "OpenClaw Graphical Installer"
-authors = ["OpenClaw Team"]
+description = "clawHelp desktop client for OpenClaw"
+authors = ["clawHelp Team"]
 edition = "2021"
 
 [lib]
-name = "openclaw_client_lib"
+name = "clawhelp_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

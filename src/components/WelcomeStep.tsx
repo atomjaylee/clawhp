@@ -18,12 +18,12 @@ export default function WelcomeStep({ onNext, onSkip }: WelcomeStepProps) {
     <div className="flex-1 flex flex-col items-center justify-center p-8 animate-fade-in">
       <div className="max-w-md w-full text-center">
         <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-teal-400 to-emerald-500 shadow-lg shadow-teal-500/25">
-          <img src="/icon.png" alt="OpenClaw" className="size-10 rounded-lg" />
+          <img src="/icon.png" alt="clawHelp" className="size-10 rounded-lg" />
         </div>
 
-        <h1 className="text-2xl font-bold mb-2">欢迎使用 OpenClaw</h1>
+        <h1 className="text-2xl font-bold mb-2">欢迎使用 clawHelp</h1>
         <p className="text-[13px] text-muted-foreground mb-8 leading-relaxed">
-          开源 AI 智能体运行时，帮助你构建、管理和运行 AI 智能体。<br />
+          clawHelp 是 OpenClaw 的桌面管理客户端，帮助你完成安装、配置和日常管理。<br />
           安装向导将引导你完成环境检测、配置和安装。
         </p>
 

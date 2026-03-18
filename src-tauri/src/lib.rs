@@ -2582,7 +2582,7 @@ async fn get_github_release_snapshot() -> CommandResult {
             "-H".to_string(),
             "Accept: application/vnd.github+json".to_string(),
             "-H".to_string(),
-            "User-Agent: openclaw-client".to_string(),
+            "User-Agent: clawhelp".to_string(),
             "https://api.github.com/repos/openclaw/openclaw/releases/latest".to_string(),
         ];
         let curl_result = run_cmd_owned_timeout("curl", &curl_args, Duration::from_secs(15));
@@ -2593,7 +2593,7 @@ async fn get_github_release_snapshot() -> CommandResult {
         let ps_args = vec![
             "-NoProfile".to_string(),
             "-Command".to_string(),
-            "Invoke-RestMethod -Headers @{ 'User-Agent' = 'openclaw-client'; 'Accept' = 'application/vnd.github+json' } https://api.github.com/repos/openclaw/openclaw/releases/latest | ConvertTo-Json -Depth 8".to_string(),
+            "Invoke-RestMethod -Headers @{ 'User-Agent' = 'clawhelp'; 'Accept' = 'application/vnd.github+json' } https://api.github.com/repos/openclaw/openclaw/releases/latest | ConvertTo-Json -Depth 8".to_string(),
         ];
         run_cmd_owned_timeout("powershell", &ps_args, Duration::from_secs(15))
     })
