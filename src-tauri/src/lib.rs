@@ -5361,6 +5361,13 @@ fn feishu_accounts_base_url(domain: &str, env: &str) -> &'static str {
     }
 }
 
+fn feishu_open_platform_base_url(domain: &str) -> &'static str {
+    match domain {
+        "lark" => "https://open.larksuite.com",
+        _ => "https://open.feishu.cn",
+    }
+}
+
 fn feishu_official_plugin_dir() -> PathBuf {
     PathBuf::from(get_openclaw_home())
         .join("extensions")
@@ -5495,6 +5502,187 @@ async fn post_feishu_registration(
         .map_err(|error| format!("解析飞书授权响应失败: {} ({})", error, text))
 }
 
+async fn validate_feishu_app_credentials(
+    app_id: &str,
+    app_secret: &str,
+    domain: &str,
+) -> Result<bool, String> {
+    let clean_app_id = app_id.trim();
+    let clean_app_secret = app_secret.trim();
+    let domain = normalize_feishu_domain(Some(domain));
+
+    if clean_app_id.is_empty() || clean_app_secret.is_empty() {
+        return Ok(false);
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("创建飞书校验请求失败: {}", error))?;
+
+    let response = client
+        .post(format!(
+            "{}/open-apis/auth/v3/tenant_access_token/internal",
+            feishu_open_platform_base_url(domain)
+        ))
+        .json(&serde_json::json!({
+            "app_id": clean_app_id,
+            "app_secret": clean_app_secret,
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("校验飞书 App 凭证失败: {}", error))?;
+
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("解析飞书 App 校验结果失败: {}", error))?;
+
+    let ok = payload.get("code").and_then(|value| value.as_i64()) == Some(0)
+        && payload
+            .get("tenant_access_token")
+            .and_then(|value| value.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+
+    Ok(ok)
+}
+
+fn write_feishu_plugin_binding_config(
+    app_id: &str,
+    app_secret: &str,
+    domain: &str,
+    open_id: Option<String>,
+) -> Result<(), String> {
+    let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    if config.get("channels").is_none() || !config["channels"].is_object() {
+        config["channels"] = serde_json::json!({});
+    }
+    if config.pointer("/channels/feishu").is_none() || !config["channels"]["feishu"].is_object() {
+        config["channels"]["feishu"] = serde_json::json!({});
+    }
+
+    if let Some(feishu) = config
+        .pointer_mut("/channels/feishu")
+        .and_then(|value| value.as_object_mut())
+    {
+        feishu.remove("accounts");
+        feishu.remove("defaultAccount");
+        feishu.remove("verificationToken");
+        feishu.remove("encryptKey");
+    }
+
+    config["channels"]["feishu"]["enabled"] = serde_json::json!(true);
+    config["channels"]["feishu"]["appId"] = serde_json::json!(app_id);
+    config["channels"]["feishu"]["appSecret"] = serde_json::json!(app_secret);
+    config["channels"]["feishu"]["domain"] = serde_json::json!(domain);
+    config["channels"]["feishu"]["connectionMode"] = serde_json::json!("websocket");
+    config["channels"]["feishu"]["requireMention"] = serde_json::json!(true);
+
+    if let Some(open_id_value) = open_id {
+        config["channels"]["feishu"]["dmPolicy"] = serde_json::json!("allowlist");
+        if config.pointer("/channels/feishu/groupPolicy").is_none() {
+            config["channels"]["feishu"]["groupPolicy"] = serde_json::json!("allowlist");
+        }
+        if config.pointer("/channels/feishu/groups").is_none() {
+            config["channels"]["feishu"]["groups"] = serde_json::json!({
+                "*": { "enabled": true }
+            });
+        }
+        ensure_string_array_contains(
+            &mut config["channels"]["feishu"]["allowFrom"],
+            &open_id_value,
+        );
+        ensure_string_array_contains(
+            &mut config["channels"]["feishu"]["groupAllowFrom"],
+            &open_id_value,
+        );
+    } else if config.pointer("/channels/feishu/dmPolicy").is_none() {
+        config["channels"]["feishu"]["dmPolicy"] = serde_json::json!("pairing");
+    }
+
+    if config.pointer("/channels/feishu/groupPolicy").is_none() {
+        config["channels"]["feishu"]["groupPolicy"] = serde_json::json!("open");
+    }
+
+    ensure_feishu_plugin_entries(&mut config);
+    write_openclaw_config(&config)
+}
+
+fn restart_gateway_in_background() {
+    std::thread::spawn(|| {
+        let restart_args = vec!["gateway".to_string(), "restart".to_string()];
+        let _ = run_openclaw_args_timeout(&restart_args, Duration::from_secs(30));
+    });
+}
+
+#[tauri::command]
+async fn bind_existing_feishu_app(
+    app_id: String,
+    app_secret: String,
+    domain: Option<String>,
+) -> CommandResult {
+    let app_id = app_id.trim().to_string();
+    let app_secret = app_secret.trim().to_string();
+    let domain = normalize_feishu_domain(domain.as_deref()).to_string();
+
+    if app_id.is_empty() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "飞书 App ID 不能为空".to_string(),
+            code: Some(1),
+        };
+    }
+    if app_secret.is_empty() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "飞书 App Secret 不能为空".to_string(),
+            code: Some(1),
+        };
+    }
+
+    let is_valid = match validate_feishu_app_credentials(&app_id, &app_secret, &domain).await {
+        Ok(value) => value,
+        Err(error) => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            };
+        }
+    };
+
+    if !is_valid {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "App ID 或 App Secret 无效，请检查后重试".to_string(),
+            code: Some(1),
+        };
+    }
+
+    if let Err(error) = write_feishu_plugin_binding_config(&app_id, &app_secret, &domain, None) {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: error,
+            code: Some(1),
+        };
+    }
+
+    restart_gateway_in_background();
+
+    CommandResult {
+        success: true,
+        stdout: "已有飞书机器人绑定完成，网关正在后台刷新".to_string(),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
 #[tauri::command]
 fn get_feishu_plugin_status() -> CommandResult {
     let config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
@@ -5608,7 +5796,7 @@ async fn install_feishu_plugin(app: AppHandle) -> CommandResult {
             &app,
             FEISHU_PLUGIN_EVENT,
             "info",
-            "飞书官方插件安装完成，下一步请在应用内扫码绑定。",
+            "飞书官方插件安装完成，下一步请在应用内扫码创建新机器人，或绑定已有机器人。",
         );
         emit_install_event(&app, FEISHU_PLUGIN_EVENT, "done", "success");
 
@@ -5879,60 +6067,7 @@ fn complete_feishu_plugin_binding(
         };
     }
 
-    let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
-    if config.get("channels").is_none() || !config["channels"].is_object() {
-        config["channels"] = serde_json::json!({});
-    }
-    if config.pointer("/channels/feishu").is_none() || !config["channels"]["feishu"].is_object() {
-        config["channels"]["feishu"] = serde_json::json!({});
-    }
-
-    if let Some(feishu) = config
-        .pointer_mut("/channels/feishu")
-        .and_then(|value| value.as_object_mut())
-    {
-        feishu.remove("accounts");
-        feishu.remove("defaultAccount");
-        feishu.remove("verificationToken");
-        feishu.remove("encryptKey");
-    }
-
-    config["channels"]["feishu"]["enabled"] = serde_json::json!(true);
-    config["channels"]["feishu"]["appId"] = serde_json::json!(app_id);
-    config["channels"]["feishu"]["appSecret"] = serde_json::json!(app_secret);
-    config["channels"]["feishu"]["domain"] = serde_json::json!(domain);
-    config["channels"]["feishu"]["connectionMode"] = serde_json::json!("websocket");
-    config["channels"]["feishu"]["requireMention"] = serde_json::json!(true);
-
-    if let Some(open_id_value) = open_id.clone() {
-        config["channels"]["feishu"]["dmPolicy"] = serde_json::json!("allowlist");
-        if config.pointer("/channels/feishu/groupPolicy").is_none() {
-            config["channels"]["feishu"]["groupPolicy"] = serde_json::json!("allowlist");
-        }
-        if config.pointer("/channels/feishu/groups").is_none() {
-            config["channels"]["feishu"]["groups"] = serde_json::json!({
-                "*": { "enabled": true }
-            });
-        }
-        ensure_string_array_contains(
-            &mut config["channels"]["feishu"]["allowFrom"],
-            &open_id_value,
-        );
-        ensure_string_array_contains(
-            &mut config["channels"]["feishu"]["groupAllowFrom"],
-            &open_id_value,
-        );
-    } else if config.pointer("/channels/feishu/dmPolicy").is_none() {
-        config["channels"]["feishu"]["dmPolicy"] = serde_json::json!("pairing");
-    }
-
-    if config.pointer("/channels/feishu/groupPolicy").is_none() {
-        config["channels"]["feishu"]["groupPolicy"] = serde_json::json!("open");
-    }
-
-    ensure_feishu_plugin_entries(&mut config);
-
-    if let Err(error) = write_openclaw_config(&config) {
+    if let Err(error) = write_feishu_plugin_binding_config(app_id, app_secret, &domain, open_id) {
         return CommandResult {
             success: false,
             stdout: String::new(),
@@ -5941,17 +6076,12 @@ fn complete_feishu_plugin_binding(
         };
     }
 
-    let restart_args = vec!["gateway".to_string(), "restart".to_string()];
-    let restart_result = run_openclaw_args_timeout(&restart_args, Duration::from_secs(30));
+    restart_gateway_in_background();
 
     CommandResult {
         success: true,
-        stdout: "飞书官方插件绑定完成".to_string(),
-        stderr: if restart_result.success {
-            String::new()
-        } else {
-            restart_result.stderr
-        },
+        stdout: "飞书官方插件绑定完成，网关正在后台刷新".to_string(),
+        stderr: String::new(),
         code: Some(0),
     }
 }
@@ -6059,6 +6189,150 @@ fn merge_feishu_channels_from_config(payload: &mut serde_json::Value) {
             "name": name,
             "enabled": enabled,
         });
+    }
+}
+
+fn channel_snapshot_name(
+    channel: &serde_json::Map<String, serde_json::Value>,
+    account: Option<&serde_json::Map<String, serde_json::Value>>,
+    fallback: &str,
+) -> String {
+    account
+        .and_then(|value| value.get("name").and_then(|entry| entry.as_str()))
+        .or_else(|| {
+            account.and_then(|value| value.get("displayName").and_then(|entry| entry.as_str()))
+        })
+        .or_else(|| account.and_then(|value| value.get("botName").and_then(|entry| entry.as_str())))
+        .or_else(|| channel.get("name").and_then(|entry| entry.as_str()))
+        .or_else(|| channel.get("displayName").and_then(|entry| entry.as_str()))
+        .or_else(|| channel.get("botName").and_then(|entry| entry.as_str()))
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn feishu_has_root_snapshot(feishu: &serde_json::Map<String, serde_json::Value>) -> bool {
+    feishu
+        .get("appId")
+        .and_then(|value| value.as_str())
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+        || feishu
+            .get("appSecret")
+            .and_then(|value| value.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        || feishu
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        || feishu
+            .get("botName")
+            .and_then(|value| value.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+}
+
+fn channel_has_root_snapshot(
+    channel_name: &str,
+    channel: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    if channel_name == "feishu" {
+        return feishu_has_root_snapshot(channel);
+    }
+
+    channel.iter().any(|(key, value)| {
+        if key == "accounts" || key == "defaultAccount" || key == "enabled" {
+            return false;
+        }
+
+        match value {
+            serde_json::Value::Null => false,
+            serde_json::Value::Bool(flag) => *flag,
+            serde_json::Value::Number(_) => true,
+            serde_json::Value::String(text) => !text.trim().is_empty(),
+            serde_json::Value::Array(items) => !items.is_empty(),
+            serde_json::Value::Object(entries) => !entries.is_empty(),
+        }
+    })
+}
+
+fn build_channels_snapshot_payload() -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "chat": {},
+        "auth": [],
+        "usage": { "providers": [] },
+    });
+
+    let Some(config) = read_openclaw_config() else {
+        return payload;
+    };
+    let Some(channels) = config
+        .pointer("/channels")
+        .and_then(|value| value.as_object())
+    else {
+        return payload;
+    };
+
+    for (channel_name, channel_value) in channels {
+        let Some(channel) = channel_value.as_object() else {
+            continue;
+        };
+
+        let channel_enabled = channel
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+
+        if let Some(accounts) = channel
+            .get("accounts")
+            .and_then(|value| value.as_object())
+            .filter(|value| !value.is_empty())
+        {
+            for (account_id, account_value) in accounts {
+                let account = account_value.as_object();
+                let name = channel_snapshot_name(channel, account, account_id);
+                let enabled = account
+                    .and_then(|value| value.get("enabled").and_then(|entry| entry.as_bool()))
+                    .unwrap_or(channel_enabled);
+
+                payload["chat"][channel_name][account_id.as_str()] = serde_json::json!({
+                    "name": name,
+                    "enabled": enabled,
+                });
+            }
+            continue;
+        }
+
+        if !channel_has_root_snapshot(channel_name, channel) {
+            continue;
+        }
+
+        let account_id = channel
+            .get("defaultAccount")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("default");
+        let name = channel_snapshot_name(channel, None, account_id);
+
+        payload["chat"][channel_name][account_id] = serde_json::json!({
+            "name": name,
+            "enabled": channel_enabled,
+        });
+    }
+
+    payload
+}
+
+#[tauri::command]
+fn list_channels_snapshot() -> CommandResult {
+    let payload = build_channels_snapshot_payload();
+
+    CommandResult {
+        success: true,
+        stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+        stderr: String::new(),
+        code: Some(0),
     }
 }
 
@@ -6875,12 +7149,14 @@ pub fn run() {
             open_channel_setup_terminal,
             open_update_terminal,
             open_feishu_plugin_terminal,
+            bind_existing_feishu_app,
             get_feishu_plugin_status,
             install_feishu_plugin,
             start_feishu_auth_session,
             poll_feishu_auth_session,
             complete_feishu_plugin_binding,
             list_channels,
+            list_channels_snapshot,
             get_feishu_channel_config,
             get_channel_status,
             save_feishu_channel,

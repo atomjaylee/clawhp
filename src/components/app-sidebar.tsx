@@ -65,7 +65,7 @@ export function AppSidebar({
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" className="cursor-default hover:bg-transparent">
-              <img src="/icon.png" alt="OpenClaw" className="size-7 rounded-lg shadow-md shadow-teal-500/25" />
+              <img src="/icon.png" alt="OpenClaw" className="size-7 rounded-lg" />
               <div className="grid flex-1 text-left text-[13px] leading-tight">
                 <span className="truncate font-semibold">OpenClaw</span>
                 <span className="truncate text-[11px] text-muted-foreground">

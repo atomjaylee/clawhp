@@ -72,6 +72,12 @@ interface FeishuAuthPollPayload {
 
 type FeishuSetupStep = "install" | "bind" | "done";
 
+interface ExistingFeishuBindingForm {
+  appId: string;
+  appSecret: string;
+  domain: "feishu" | "lark";
+}
+
 const CHANNEL_LABELS: Record<string, { label: string; color: string }> = {
   telegram: { label: "Telegram", color: "bg-sky-500/15 text-sky-400" },
   whatsapp: { label: "WhatsApp", color: "bg-emerald-500/15 text-emerald-400" },
@@ -89,6 +95,8 @@ const CHANNEL_LABELS: Record<string, { label: string; color: string }> = {
   mattermost: { label: "Mattermost", color: "bg-blue-600/15 text-blue-400" },
   zalo: { label: "Zalo", color: "bg-blue-500/15 text-blue-400" },
 };
+
+const inputCls = "w-full h-9 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 text-[13px] text-foreground placeholder:text-muted-foreground/45 focus:outline-none focus:ring-1 focus:ring-sky-400/40";
 
 function getChannelInfo(ch: string) {
   return CHANNEL_LABELS[ch] ?? { label: ch, color: "bg-white/10 text-foreground/70" };
@@ -394,6 +402,35 @@ function formatRemainingSeconds(value: number) {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+function extractChannelEntries(data: Record<string, unknown>) {
+  const entries: ChannelEntry[] = [];
+  const chat = (data.chat ?? {}) as Record<string, unknown>;
+
+  for (const [channelName, accounts] of Object.entries(chat)) {
+    if (!accounts || typeof accounts !== "object") {
+      continue;
+    }
+    for (const [accountId, accountData] of Object.entries(accounts as Record<string, unknown>)) {
+      const account = (accountData ?? {}) as Record<string, unknown>;
+      entries.push({
+        channel: channelName,
+        account: accountId,
+        name: (account.name as string) ?? accountId,
+        enabled: account.enabled !== false,
+      });
+    }
+  }
+
+  entries.sort((left, right) => {
+    if (left.channel !== right.channel) {
+      return left.channel.localeCompare(right.channel);
+    }
+    return left.account.localeCompare(right.account);
+  });
+
+  return entries;
+}
+
 export default function ChannelsPage() {
   const [channels, setChannels] = useState<ChannelEntry[]>([]);
   const [statuses, setStatuses] = useState<ChannelStatus[]>([]);
@@ -419,6 +456,13 @@ export default function ChannelsPage() {
   const [bindingPhase, setBindingPhase] = useState<"idle" | "waiting" | "finalizing" | "done">("idle");
   const [bindingError, setBindingError] = useState("");
   const [bindingHint, setBindingHint] = useState("");
+  const [existingBindingForm, setExistingBindingForm] = useState<ExistingFeishuBindingForm>({
+    appId: "",
+    appSecret: "",
+    domain: "feishu",
+  });
+  const [existingBinding, setExistingBinding] = useState(false);
+  const [existingBindingError, setExistingBindingError] = useState("");
 
   const installProgressRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const installLogEndRef = useRef<HTMLDivElement | null>(null);
@@ -470,48 +514,32 @@ export default function ChannelsPage() {
     };
   }, [appendInstallLog]);
 
-  const fetchChannels = useCallback(async () => {
-    setLoading(true);
+  const fetchChannels = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) {
+      setLoading(true);
+    }
     setError("");
     try {
       const result: CommandResult = await invoke("list_channels");
       if (!result.success) {
-        setChannels([]);
+        if (!options?.silent) {
+          setChannels([]);
+        }
         setError(result.stderr || "频道列表加载失败");
         return;
       }
 
       const data = result.stdout ? parseJsonValue<Record<string, unknown>>(result.stdout, {}) : {};
-      const entries: ChannelEntry[] = [];
-      const chat = (data.chat ?? {}) as Record<string, unknown>;
-
-      for (const [channelName, accounts] of Object.entries(chat)) {
-        if (!accounts || typeof accounts !== "object") {
-          continue;
-        }
-        for (const [accountId, accountData] of Object.entries(accounts as Record<string, unknown>)) {
-          const account = (accountData ?? {}) as Record<string, unknown>;
-          entries.push({
-            channel: channelName,
-            account: accountId,
-            name: (account.name as string) ?? accountId,
-            enabled: account.enabled !== false,
-          });
-        }
-      }
-
-      entries.sort((left, right) => {
-        if (left.channel !== right.channel) {
-          return left.channel.localeCompare(right.channel);
-        }
-        return left.account.localeCompare(right.account);
-      });
-      setChannels(entries);
+      setChannels(extractChannelEntries(data));
     } catch (e) {
-      setChannels([]);
+      if (!options?.silent) {
+        setChannels([]);
+      }
       setError(`${e}`);
     } finally {
-      setLoading(false);
+      if (!options?.silent) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -533,12 +561,47 @@ export default function ChannelsPage() {
     }
   }, []);
 
-  const refreshAll = useCallback(async () => {
-    await Promise.all([fetchChannels(), fetchStatus()]);
+  const refreshAll = useCallback(async (options?: { silent?: boolean }) => {
+    await Promise.all([fetchChannels({ silent: options?.silent }), fetchStatus()]);
   }, [fetchChannels, fetchStatus]);
 
   useEffect(() => {
-    void refreshAll();
+    let cancelled = false;
+
+    const bootstrap = async () => {
+      setLoading(true);
+      setError("");
+
+      try {
+        const result: CommandResult = await invoke("list_channels_snapshot");
+        if (cancelled) {
+          return;
+        }
+
+        if (!result.success) {
+          setError(result.stderr || "频道列表加载失败");
+        } else {
+          const data = result.stdout ? parseJsonValue<Record<string, unknown>>(result.stdout, {}) : {};
+          setChannels(extractChannelEntries(data));
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(`${e}`);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+
+      void refreshAll({ silent: true });
+    };
+
+    void bootstrap();
+
+    return () => {
+      cancelled = true;
+    };
   }, [refreshAll]);
 
   const getStatus = useCallback((channel: string, account: string) => (
@@ -558,6 +621,13 @@ export default function ChannelsPage() {
     setBindingPhase("idle");
     setBindingError("");
     setBindingHint("");
+    setExistingBinding(false);
+    setExistingBindingError("");
+    setExistingBindingForm({
+      appId: "",
+      appSecret: "",
+      domain: "feishu",
+    });
   }, []);
 
   const loadFeishuSetup = useCallback(async () => {
@@ -578,6 +648,11 @@ export default function ChannelsPage() {
 
       setFeishuStatus(parsed);
       setSetupStep(parsed.officialPluginInstalled ? (parsed.channelConfigured ? "done" : "bind") : "install");
+      setExistingBindingForm((prev) => ({
+        appId: parsed.appId || prev.appId,
+        appSecret: "",
+        domain: parsed.domain === "lark" ? "lark" : "feishu",
+      }));
       return parsed;
     } catch (e) {
       setSetupError(`${e}`);
@@ -587,8 +662,62 @@ export default function ChannelsPage() {
     }
   }, []);
 
-  const beginFeishuBinding = useCallback(async () => {
+  const applyFeishuBindingSuccess = useCallback((message: string, next: { appId: string; domain: string }) => {
+    const resolvedDomain = next.domain === "lark" ? "lark" : "feishu";
+
+    setSetupError("");
+    setSetupStep("done");
+    setBindingPhase("done");
     setBindingError("");
+    setExistingBindingError("");
+    setBindingHint(message);
+    setAuthSession(null);
+    setAuthQrDataUrl("");
+    setFeishuStatus((prev) => ({
+      officialPluginInstalled: true,
+      officialPluginEnabled: true,
+      communityPluginEnabled: prev?.communityPluginEnabled ?? false,
+      channelConfigured: true,
+      appId: next.appId || prev?.appId || "",
+      displayName: prev?.displayName || "飞书官方插件",
+      domain: resolvedDomain,
+    }));
+    setExistingBindingForm((prev) => ({
+      appId: next.appId || prev.appId,
+      appSecret: "",
+      domain: resolvedDomain,
+    }));
+
+    void (async () => {
+      try {
+        const result: CommandResult = await invoke("get_feishu_plugin_status");
+        if (result.success) {
+          const parsed = parseJsonValue<FeishuPluginStatus | null>(result.stdout, null);
+          if (parsed) {
+            setFeishuStatus(parsed);
+            setExistingBindingForm((prev) => ({
+              appId: parsed.appId || prev.appId,
+              appSecret: "",
+              domain: parsed.domain === "lark" ? "lark" : "feishu",
+            }));
+          }
+        }
+      } catch {
+        // Keep the optimistic UI if background status sync fails.
+      }
+
+      try {
+        await refreshAll({ silent: true });
+      } catch {
+        // The page-level refresh already manages its own error state.
+      }
+    })();
+  }, [refreshAll]);
+
+  const beginFeishuBinding = useCallback(async () => {
+    setSetupError("");
+    setBindingError("");
+    setExistingBindingError("");
     setBindingHint("");
     setBindingPhase("idle");
     setAuthSession(null);
@@ -629,20 +758,17 @@ export default function ChannelsPage() {
     setEditingAccountId(accountId ?? null);
     setDialogOpen(true);
     resetFeishuDialogState();
-    const status = await loadFeishuSetup();
-    if (status?.officialPluginInstalled && !status.channelConfigured) {
-      await beginFeishuBinding();
-    }
-  }, [beginFeishuBinding, loadFeishuSetup, resetFeishuDialogState]);
+    await loadFeishuSetup();
+  }, [loadFeishuSetup, resetFeishuDialogState]);
 
   const closeDialog = useCallback(() => {
-    if (installPhase === "running" || bindingPhase === "finalizing") {
+    if (installPhase === "running" || bindingPhase === "finalizing" || existingBinding) {
       return;
     }
     setDialogOpen(false);
     setEditingAccountId(null);
     resetFeishuDialogState();
-  }, [bindingPhase, installPhase, resetFeishuDialogState]);
+  }, [bindingPhase, existingBinding, installPhase, resetFeishuDialogState]);
 
   const handleRemove = async (channel: string, account: string) => {
     if (!confirm(`确定移除 ${getChannelInfo(channel).label} (${account}) 吗？`)) return;
@@ -669,10 +795,11 @@ export default function ChannelsPage() {
     setInstallProgress(5);
     setInstallLogs([]);
     setBindingError("");
+    setExistingBindingError("");
     setSetupError("");
 
     appendInstallLog("info", "正在应用内安装飞书官方插件...");
-    appendInstallLog("info", "安装完成后会直接进入扫码绑定。");
+    appendInstallLog("info", "安装完成后你可以扫码创建新机器人，或填写已有机器人的 App ID / App Secret。");
 
     if (installProgressRef.current) {
       clearInterval(installProgressRef.current);
@@ -691,7 +818,7 @@ export default function ChannelsPage() {
       const latestStatus = await loadFeishuSetup();
       if (latestStatus?.officialPluginInstalled) {
         setSetupStep("bind");
-        await beginFeishuBinding();
+        setBindingHint("官方插件已安装好。你现在可以扫码创建新机器人，或填写已有机器人的 App ID / App Secret。");
       }
     } catch (e) {
       if (installProgressRef.current) {
@@ -703,7 +830,55 @@ export default function ChannelsPage() {
       setSetupError(`${e}`);
       appendInstallLog("error", `${e}`);
     }
-  }, [appendInstallLog, beginFeishuBinding, loadFeishuSetup]);
+  }, [appendInstallLog, loadFeishuSetup]);
+
+  const handleBindExistingFeishu = useCallback(async () => {
+    const appId = existingBindingForm.appId.trim();
+    const appSecret = existingBindingForm.appSecret.trim();
+
+    if (!appId) {
+      setExistingBindingError("请先填写飞书 App ID");
+      return;
+    }
+    if (!appSecret) {
+      setExistingBindingError("请先填写飞书 App Secret");
+      return;
+    }
+
+    setSetupError("");
+    setBindingError("");
+    setExistingBindingError("");
+    setExistingBinding(true);
+    setBindingPhase("idle");
+    setAuthSession(null);
+    setAuthQrDataUrl("");
+    setBindingHint("正在校验已有机器人的凭证并写入配置...");
+
+    try {
+      const result: CommandResult = await invoke("bind_existing_feishu_app", {
+        appId,
+        appSecret,
+        domain: existingBindingForm.domain,
+      });
+
+      if (!result.success) {
+        setExistingBindingError(result.stderr || "已有飞书机器人绑定失败");
+        return;
+      }
+
+      applyFeishuBindingSuccess(
+        result.stdout || "已有飞书机器人绑定完成，可以回到频道列表继续使用。",
+        {
+          appId,
+          domain: existingBindingForm.domain,
+        },
+      );
+    } catch (e) {
+      setExistingBindingError(`${e}`);
+    } finally {
+      setExistingBinding(false);
+    }
+  }, [applyFeishuBindingSuccess, existingBindingForm]);
 
   useEffect(() => {
     if (bindingPhase !== "waiting" || !authSession) {
@@ -731,6 +906,9 @@ export default function ChannelsPage() {
           lane: null,
           domain: authSession.domain,
         });
+        if (cancelled) {
+          return;
+        }
 
         if (!result.success) {
           setBindingPhase("idle");
@@ -754,7 +932,7 @@ export default function ChannelsPage() {
 
         if (payload.status === "success" && payload.appId && payload.appSecret) {
           setBindingPhase("finalizing");
-          setBindingHint("扫码成功，正在写入配置并刷新飞书频道...");
+          setBindingHint("扫码成功，正在应用绑定结果...");
 
           const bindingResult: CommandResult = await invoke("complete_feishu_plugin_binding", {
             appId: payload.appId,
@@ -762,6 +940,9 @@ export default function ChannelsPage() {
             domain: payload.suggestedDomain ?? authSession.domain,
             openId: payload.openId ?? null,
           });
+          if (cancelled) {
+            return;
+          }
 
           if (!bindingResult.success) {
             setBindingPhase("idle");
@@ -769,15 +950,13 @@ export default function ChannelsPage() {
             return;
           }
 
-          const latestStatus = await loadFeishuSetup();
-          setFeishuStatus(latestStatus ?? feishuStatus);
-          setSetupStep("done");
-          setBindingPhase("done");
-          setBindingError("");
-          setBindingHint(bindingResult.stderr
-            ? `飞书已绑定完成，但网关重启返回提醒：${bindingResult.stderr}`
-            : "飞书已绑定完成，可以回到频道列表继续使用。");
-          await refreshAll();
+          applyFeishuBindingSuccess(
+            bindingResult.stdout || "飞书已绑定完成，可以回到频道列表继续使用。",
+            {
+              appId: payload.appId,
+              domain: payload.suggestedDomain ?? authSession.domain,
+            },
+          );
           return;
         }
 
@@ -816,7 +995,7 @@ export default function ChannelsPage() {
         clearTimeout(timer);
       }
     };
-  }, [authSession, bindingPhase, feishuStatus, loadFeishuSetup, refreshAll]);
+  }, [applyFeishuBindingSuccess, authSession, bindingPhase]);
 
   const showInstallLogs = installPhase === "running" || installLogs.length > 0;
 
@@ -870,7 +1049,7 @@ export default function ChannelsPage() {
                 </div>
                 <h3 className="mb-1 text-[14px] font-semibold">先接入一个飞书频道</h3>
                 <p className="mx-auto mb-4 max-w-sm text-[12px] text-muted-foreground">
-                  点击“添加飞书”后会直接在应用内检测官方插件、安装插件并展示扫码绑定，不再跳出命令行窗口。
+                  点击“添加飞书”后会直接在应用内检测并安装官方插件，接着可以扫码创建新机器人，或绑定已有机器人，不再跳出命令行窗口。
                 </p>
                 <div className="flex justify-center gap-2">
                   <Button size="sm" onClick={() => void openFeishuDialog()}>
@@ -974,12 +1153,12 @@ export default function ChannelsPage() {
                     <div>
                       <h3 className="text-[13px] font-semibold">{editingAccountId ? "管理飞书接入" : "添加飞书"}</h3>
                       <p className="text-[11px] text-muted-foreground">
-                        直接在应用内完成官方插件安装和扫码绑定，不再外跳终端。
+                        直接在应用内完成官方插件安装、扫码新建和已有机器人绑定，不再外跳终端。
                       </p>
                     </div>
                   </div>
                 </div>
-                <Button size="sm" variant="ghost" onClick={closeDialog} disabled={installPhase === "running" || bindingPhase === "finalizing"}>
+                <Button size="sm" variant="ghost" onClick={closeDialog} disabled={installPhase === "running" || bindingPhase === "finalizing" || existingBinding}>
                   关闭
                 </Button>
               </div>
@@ -991,9 +1170,9 @@ export default function ChannelsPage() {
                 </div>
               ) : (
                 <>
-                  {(setupError || bindingError) && (
+                  {(setupError || bindingError || existingBindingError) && (
                     <div className="rounded-lg border border-red-500/20 bg-red-500/8 px-3 py-2.5 text-[12px] text-red-300">
-                      {setupError || bindingError}
+                      {setupError || bindingError || existingBindingError}
                     </div>
                   )}
 
@@ -1010,18 +1189,18 @@ export default function ChannelsPage() {
                     <Card className={`border-white/[0.08] ${setupStep === "bind" ? "bg-sky-500/10" : "bg-white/[0.02]"}`}>
                       <CardContent className="space-y-2 p-4">
                         <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 2 步</p>
-                        <h4 className="text-[13px] font-semibold">扫码绑定</h4>
+                        <h4 className="text-[13px] font-semibold">绑定机器人</h4>
                         <p className="text-[12px] leading-5 text-muted-foreground">
-                          在当前窗口展示二维码，用飞书扫一扫后自动轮询授权结果。
+                          可以在当前窗口扫码创建新机器人，也可以直接填写已有机器人的 App ID / App Secret。
                         </p>
                       </CardContent>
                     </Card>
                     <Card className={`border-white/[0.08] ${setupStep === "done" ? "bg-emerald-500/10" : "bg-white/[0.02]"}`}>
                       <CardContent className="space-y-2 p-4">
                         <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 3 步</p>
-                        <h4 className="text-[13px] font-semibold">写入配置并生效</h4>
+                        <h4 className="text-[13px] font-semibold">写入配置并后台生效</h4>
                         <p className="text-[12px] leading-5 text-muted-foreground">
-                          扫码成功后自动写入 `channels.feishu`，并刷新频道列表。
+                          绑定成功后会立即写入 `channels.feishu`，并在后台刷新网关和频道列表。
                         </p>
                       </CardContent>
                     </Card>
@@ -1033,7 +1212,7 @@ export default function ChannelsPage() {
                         <div className="space-y-1">
                           <h4 className="text-[14px] font-semibold">先安装飞书官方插件</h4>
                           <p className="text-[12px] text-muted-foreground">
-                            检测到当前环境还没有官方飞书插件。点一下按钮，应用会自动完成安装，装好后直接进入扫码绑定。
+                            检测到当前环境还没有官方飞书插件。点一下按钮，应用会自动完成安装，装好后你就可以扫码创建新机器人，或绑定已有机器人。
                           </p>
                         </div>
 
@@ -1091,12 +1270,12 @@ export default function ChannelsPage() {
                         <CardContent className="space-y-4 p-4">
                           <div className="space-y-1">
                             <h4 className="text-[14px] font-semibold">
-                              {setupStep === "done" ? "飞书已接入" : "扫码绑定飞书"}
+                              {setupStep === "done" ? "飞书已接入" : "绑定飞书机器人"}
                             </h4>
                             <p className="text-[12px] text-muted-foreground">
                               {setupStep === "done"
-                                ? "官方飞书插件已经可用。如果你想更换绑定，可以重新生成二维码再扫一次。"
-                                : "二维码会在当前窗口内展示，扫码成功后会自动写入配置。"}
+                                ? "官方飞书插件已经可用。如果你想更换绑定，可以重新扫码创建新机器人，或切换到已有机器人。"
+                                : "这里支持两种接入方式：扫码创建新机器人，或输入已有机器人的 App ID / App Secret。"}
                             </p>
                           </div>
 
@@ -1112,34 +1291,161 @@ export default function ChannelsPage() {
                             </div>
                           )}
 
-                          {bindingPhase === "waiting" && authQrDataUrl ? (
-                            <div className="space-y-3">
-                              <div className="rounded-2xl border border-sky-500/15 bg-sky-500/8 p-5 text-center">
-                                <img src={authQrDataUrl} alt="飞书扫码二维码" className="mx-auto h-56 w-56 rounded-xl bg-white p-3" />
-                                <p className="mt-3 text-[13px] font-medium text-sky-50">请用飞书扫一扫</p>
-                                <p className="mt-1 text-[12px] text-sky-100/75">{bindingHint}</p>
-                              </div>
-                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
-                                <p>二维码有效期约 {authSession ? formatRemainingSeconds(authSession.expireInSeconds) : "--"}，授权完成后这里会自动继续。</p>
-                                <p className="mt-1">如果你扫码后没有变化，可以等待几秒，或者重新生成二维码。</p>
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-4 text-[12px] text-muted-foreground">
-                              <p>{bindingHint || "准备好后点击下方按钮生成二维码。"}</p>
-                            </div>
-                          )}
+                          <div className="grid gap-4 xl:grid-cols-2">
+                            <Card className="border-white/[0.06] bg-white/[0.03]">
+                              <CardContent className="space-y-4 p-4">
+                                <div className="space-y-1">
+                                  <h5 className="text-[13px] font-semibold">扫码创建新机器人</h5>
+                                  <p className="text-[12px] text-muted-foreground">
+                                    应用内生成二维码，用飞书扫一扫后自动写入配置。
+                                  </p>
+                                </div>
+
+                                {bindingPhase === "waiting" && authQrDataUrl ? (
+                                  <div className="space-y-3">
+                                    <div className="rounded-2xl border border-sky-500/15 bg-sky-500/8 p-5 text-center">
+                                      <img src={authQrDataUrl} alt="飞书扫码二维码" className="mx-auto h-56 w-56 rounded-xl bg-white p-3" />
+                                      <p className="mt-3 text-[13px] font-medium text-sky-50">请用飞书扫一扫</p>
+                                      <p className="mt-1 text-[12px] text-sky-100/75">{bindingHint}</p>
+                                    </div>
+                                    <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
+                                      <p>二维码有效期约 {authSession ? formatRemainingSeconds(authSession.expireInSeconds) : "--"}，授权完成后这里会自动继续。</p>
+                                      <p className="mt-1">如果扫码后暂时没有变化，可以等待几秒，或者重新生成二维码。</p>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-4 text-[12px] text-muted-foreground">
+                                    <p>{bindingHint || "准备好后点击下方按钮生成二维码。"}</p>
+                                  </div>
+                                )}
+
+                                <div className="flex flex-wrap gap-2">
+                                  <Button
+                                    size="sm"
+                                    onClick={() => void beginFeishuBinding()}
+                                    disabled={bindingPhase === "waiting" || bindingPhase === "finalizing" || existingBinding || installPhase === "running"}
+                                  >
+                                    {bindingPhase === "finalizing" ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
+                                    {bindingPhase === "waiting" ? "等待扫码中..." : bindingPhase === "finalizing" ? "写入配置中..." : feishuStatus?.channelConfigured ? "重新扫码创建" : "开始扫码创建"}
+                                  </Button>
+                                  {bindingPhase === "waiting" && (
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => {
+                                        setAuthSession(null);
+                                        setAuthQrDataUrl("");
+                                        setBindingPhase("idle");
+                                        setBindingError("");
+                                        setBindingHint("已取消本次扫码。你可以重新生成二维码，或改用已有机器人绑定。");
+                                      }}
+                                      disabled={existingBinding}
+                                    >
+                                      取消扫码
+                                    </Button>
+                                  )}
+                                </div>
+                              </CardContent>
+                            </Card>
+
+                            <Card className="border-white/[0.06] bg-white/[0.03]">
+                              <CardContent className="space-y-4 p-4">
+                                <div className="space-y-1">
+                                  <h5 className="text-[13px] font-semibold">绑定已有机器人</h5>
+                                  <p className="text-[12px] text-muted-foreground">
+                                    直接输入已创建机器人的 App ID 和 App Secret，无需重新扫码创建。
+                                  </p>
+                                </div>
+
+                                <div className="space-y-3">
+                                  <div className="space-y-1">
+                                    <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">域名环境</label>
+                                    <div className="grid grid-cols-2 gap-2">
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        className={existingBindingForm.domain === "feishu"
+                                          ? "border-sky-400/40 bg-sky-500/15 text-sky-50 hover:bg-sky-500/20 hover:text-sky-50"
+                                          : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:bg-white/[0.04]"}
+                                        onClick={() => setExistingBindingForm((prev) => ({ ...prev, domain: "feishu" }))}
+                                        disabled={existingBinding || bindingPhase === "finalizing"}
+                                      >
+                                        飞书
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        className={existingBindingForm.domain === "lark"
+                                          ? "border-sky-400/40 bg-sky-500/15 text-sky-50 hover:bg-sky-500/20 hover:text-sky-50"
+                                          : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:bg-white/[0.04]"}
+                                        onClick={() => setExistingBindingForm((prev) => ({ ...prev, domain: "lark" }))}
+                                        disabled={existingBinding || bindingPhase === "finalizing"}
+                                      >
+                                        Lark
+                                      </Button>
+                                    </div>
+                                  </div>
+
+                                  <div className="space-y-1">
+                                    <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">App ID</label>
+                                    <input
+                                      className={inputCls}
+                                      placeholder="cli_xxx"
+                                      value={existingBindingForm.appId}
+                                      onChange={(event) => setExistingBindingForm((prev) => ({ ...prev, appId: event.target.value }))}
+                                      disabled={existingBinding || bindingPhase === "finalizing"}
+                                      autoCapitalize="off"
+                                      autoComplete="off"
+                                      spellCheck={false}
+                                    />
+                                  </div>
+
+                                  <div className="space-y-1">
+                                    <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">App Secret</label>
+                                    <input
+                                      type="password"
+                                      className={inputCls}
+                                      placeholder="填写已有机器人的 App Secret"
+                                      value={existingBindingForm.appSecret}
+                                      onChange={(event) => setExistingBindingForm((prev) => ({ ...prev, appSecret: event.target.value }))}
+                                      disabled={existingBinding || bindingPhase === "finalizing"}
+                                      autoCapitalize="off"
+                                      autoComplete="off"
+                                      spellCheck={false}
+                                    />
+                                  </div>
+                                </div>
+
+                                <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
+                                  <p>如果你之前已经在飞书开放平台建好了机器人，这里直接填入凭证即可，不需要重新走扫码创建。</p>
+                                </div>
+
+                                <div className="flex flex-wrap gap-2">
+                                  <Button
+                                    size="sm"
+                                    onClick={() => void handleBindExistingFeishu()}
+                                    disabled={existingBinding || bindingPhase === "finalizing" || installPhase === "running" || !existingBindingForm.appId.trim() || !existingBindingForm.appSecret.trim()}
+                                  >
+                                    {existingBinding ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={14} />}
+                                    {existingBinding ? "绑定中..." : feishuStatus?.channelConfigured ? "保存并改绑" : "保存并绑定"}
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => setExistingBindingForm((prev) => ({ ...prev, appSecret: "" }))}
+                                    disabled={existingBinding || bindingPhase === "finalizing" || !existingBindingForm.appSecret}
+                                  >
+                                    清空密钥
+                                  </Button>
+                                </div>
+                              </CardContent>
+                            </Card>
+                          </div>
 
                           <div className="flex flex-wrap gap-2">
-                            <Button
-                              size="sm"
-                              onClick={() => void beginFeishuBinding()}
-                              disabled={bindingPhase === "waiting" || bindingPhase === "finalizing"}
-                            >
-                              {bindingPhase === "finalizing" ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
-                              {bindingPhase === "waiting" ? "等待扫码中..." : bindingPhase === "finalizing" ? "写入配置中..." : feishuStatus?.channelConfigured ? "重新扫码绑定" : "开始扫码绑定"}
-                            </Button>
-                            <Button size="sm" variant="outline" onClick={() => void refreshAll()} disabled={bindingPhase === "finalizing"}>
+                            <Button size="sm" variant="outline" onClick={() => void refreshAll()} disabled={bindingPhase === "finalizing" || existingBinding}>
                               <RefreshCw size={14} />
                               刷新频道列表
                             </Button>
@@ -1164,13 +1470,15 @@ export default function ChannelsPage() {
                               <p className="mt-1 font-medium text-foreground">{feishuStatus?.officialPluginEnabled ? "已启用" : "待启用"}</p>
                             </div>
                             <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
-                              <p className="text-muted-foreground">扫码绑定</p>
+                              <p className="text-muted-foreground">机器人绑定</p>
                               <p className="mt-1 font-medium text-foreground">
-                                {bindingPhase === "done"
+                                {existingBinding
+                                  ? "校验已有机器人"
+                                  : bindingPhase === "done"
                                   ? "已完成"
                                   : bindingPhase === "finalizing"
                                     ? "写入配置中"
-                                    : bindingPhase === "waiting"
+                                      : bindingPhase === "waiting"
                                       ? "等待扫码"
                                       : feishuStatus?.channelConfigured
                                         ? "已配置，可重新扫码"
