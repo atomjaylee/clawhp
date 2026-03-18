@@ -5672,6 +5672,24 @@ struct FeishuRouteBindingsSnapshotPayload {
     routes: Vec<FeishuRouteBindingPayload>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeishuAccountBindingSummaryPayload {
+    account_id: String,
+    display_name: String,
+    app_id: String,
+    domain: String,
+    enabled: bool,
+    bound_agent_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeishuAccountBindingCatalogPayload {
+    default_account_id: String,
+    accounts: Vec<FeishuAccountBindingSummaryPayload>,
+}
+
 fn normalize_feishu_env(value: Option<&str>) -> &'static str {
     match value.unwrap_or("prod").trim().to_ascii_lowercase().as_str() {
         "boe" => "boe",
@@ -5929,6 +5947,484 @@ fn ensure_feishu_plugin_entries(config: &mut serde_json::Value) {
     config["plugins"]["entries"]["feishu"]["enabled"] = serde_json::json!(false);
 }
 
+fn ensure_feishu_channels_config(config: &mut serde_json::Value) {
+    if config.get("channels").is_none() || !config["channels"].is_object() {
+        config["channels"] = serde_json::json!({});
+    }
+    if config.pointer("/channels/feishu").is_none() || !config["channels"]["feishu"].is_object() {
+        config["channels"]["feishu"] = serde_json::json!({});
+    }
+    if config.pointer("/channels/feishu/accounts").is_none()
+        || !config["channels"]["feishu"]["accounts"].is_object()
+    {
+        config["channels"]["feishu"]["accounts"] = serde_json::json!({});
+    }
+}
+
+fn feishu_root_has_credentials(config: &serde_json::Value) -> bool {
+    config
+        .pointer("/channels/feishu/appId")
+        .and_then(|value| value.as_str())
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+        || config
+            .pointer("/channels/feishu/appSecret")
+            .and_then(|value| value.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        || config
+            .pointer("/channels/feishu/name")
+            .and_then(|value| value.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        || config
+            .pointer("/channels/feishu/botName")
+            .and_then(|value| value.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+}
+
+fn materialize_feishu_root_account_if_needed(config: &mut serde_json::Value) {
+    ensure_feishu_channels_config(config);
+
+    let has_accounts = config
+        .pointer("/channels/feishu/accounts")
+        .and_then(|value| value.as_object())
+        .map(|value| !value.is_empty())
+        .unwrap_or(false);
+    if has_accounts || !feishu_root_has_credentials(config) {
+        return;
+    }
+
+    let account_id = read_feishu_default_account_id(config);
+    let feishu = config
+        .pointer("/channels/feishu")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    if let Some(value) = feishu.get("enabled") {
+        config["channels"]["feishu"]["accounts"][account_id.as_str()]["enabled"] = value.clone();
+    }
+    if let Some(value) = feishu.get("appId") {
+        config["channels"]["feishu"]["accounts"][account_id.as_str()]["appId"] = value.clone();
+    }
+    if let Some(value) = feishu.get("appSecret") {
+        config["channels"]["feishu"]["accounts"][account_id.as_str()]["appSecret"] = value.clone();
+    }
+    if let Some(value) = feishu.get("name") {
+        config["channels"]["feishu"]["accounts"][account_id.as_str()]["name"] = value.clone();
+    }
+    if let Some(value) = feishu.get("botName") {
+        config["channels"]["feishu"]["accounts"][account_id.as_str()]["botName"] = value.clone();
+    }
+    if let Some(value) = feishu.get("domain") {
+        config["channels"]["feishu"]["accounts"][account_id.as_str()]["domain"] = value.clone();
+    }
+    if let Some(value) = feishu.get("verificationToken") {
+        config["channels"]["feishu"]["accounts"][account_id.as_str()]["verificationToken"] =
+            value.clone();
+    }
+    if let Some(value) = feishu.get("encryptKey") {
+        config["channels"]["feishu"]["accounts"][account_id.as_str()]["encryptKey"] = value.clone();
+    }
+
+    if config.pointer("/channels/feishu/defaultAccount").is_none() {
+        config["channels"]["feishu"]["defaultAccount"] = serde_json::json!(account_id);
+    }
+
+    if let Some(feishu_mut) = config
+        .pointer_mut("/channels/feishu")
+        .and_then(|value| value.as_object_mut())
+    {
+        feishu_mut.remove("appId");
+        feishu_mut.remove("appSecret");
+        feishu_mut.remove("name");
+        feishu_mut.remove("botName");
+        feishu_mut.remove("verificationToken");
+        feishu_mut.remove("encryptKey");
+    }
+}
+
+fn feishu_account_display_name(
+    channel: &serde_json::Map<String, serde_json::Value>,
+    account: Option<&serde_json::Map<String, serde_json::Value>>,
+    fallback: &str,
+) -> String {
+    account
+        .and_then(|value| value.get("name").and_then(|entry| entry.as_str()))
+        .or_else(|| account.and_then(|value| value.get("botName").and_then(|entry| entry.as_str())))
+        .or_else(|| channel.get("name").and_then(|entry| entry.as_str()))
+        .or_else(|| channel.get("botName").and_then(|entry| entry.as_str()))
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn read_feishu_account_binding_map(config: &serde_json::Value) -> BTreeMap<String, String> {
+    let default_account_id = read_feishu_default_account_id(config);
+    let Some(bindings) = config.get("bindings").and_then(|value| value.as_array()) else {
+        return BTreeMap::new();
+    };
+
+    let mut mapping = BTreeMap::new();
+    for binding in bindings {
+        if !is_feishu_route_binding(binding) {
+            continue;
+        }
+
+        let Some(agent_id) = binding
+            .get("agentId")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+
+        let Some(binding_match) = binding.get("match").and_then(|value| value.as_object()) else {
+            continue;
+        };
+        if binding_match.get("peer").is_some() {
+            continue;
+        }
+
+        let account_id = binding_match
+            .get("accountId")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "*")
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| default_account_id.clone());
+
+        mapping.entry(account_id).or_insert_with(|| agent_id.to_string());
+    }
+
+    mapping
+}
+
+fn collect_feishu_account_binding_catalog(
+    config: &serde_json::Value,
+) -> FeishuAccountBindingCatalogPayload {
+    let default_account_id = read_feishu_default_account_id(config);
+    let binding_map = read_feishu_account_binding_map(config);
+    let feishu = config
+        .pointer("/channels/feishu")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let accounts = feishu
+        .get("accounts")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let summaries = if !accounts.is_empty() {
+        accounts
+            .iter()
+            .map(|(account_id, account_value)| {
+                let account = account_value.as_object();
+                FeishuAccountBindingSummaryPayload {
+                    account_id: account_id.clone(),
+                    display_name: feishu_account_display_name(&feishu, account, account_id),
+                    app_id: account
+                        .and_then(|value| value.get("appId").and_then(|entry| entry.as_str()))
+                        .unwrap_or("")
+                        .to_string(),
+                    domain: account
+                        .and_then(|value| value.get("domain").and_then(|entry| entry.as_str()))
+                        .or_else(|| feishu.get("domain").and_then(|entry| entry.as_str()))
+                        .unwrap_or("feishu")
+                        .to_string(),
+                    enabled: account
+                        .and_then(|value| value.get("enabled").and_then(|entry| entry.as_bool()))
+                        .unwrap_or(true),
+                    bound_agent_id: binding_map.get(account_id).cloned(),
+                }
+            })
+            .collect::<Vec<_>>()
+    } else if feishu_root_has_credentials(config) {
+        vec![FeishuAccountBindingSummaryPayload {
+            account_id: default_account_id.clone(),
+            display_name: feishu_account_display_name(&feishu, None, &default_account_id),
+            app_id: feishu
+                .get("appId")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            domain: feishu
+                .get("domain")
+                .and_then(|value| value.as_str())
+                .unwrap_or("feishu")
+                .to_string(),
+            enabled: feishu
+                .get("enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true),
+            bound_agent_id: binding_map.get(&default_account_id).cloned(),
+        }]
+    } else {
+        Vec::new()
+    };
+
+    FeishuAccountBindingCatalogPayload {
+        default_account_id,
+        accounts: summaries,
+    }
+}
+
+fn prune_feishu_complex_bindings(config: &mut serde_json::Value) {
+    let Some(bindings) = config.get_mut("bindings").and_then(|value| value.as_array_mut()) else {
+        return;
+    };
+
+    bindings.retain(|binding| {
+        if !is_feishu_route_binding(binding) {
+            return true;
+        }
+
+        let Some(binding_match) = binding.get("match").and_then(|value| value.as_object()) else {
+            return false;
+        };
+
+        if binding_match.get("peer").is_some() {
+            return false;
+        }
+
+        binding_match
+            .get("accountId")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .is_none_or(|value| value != "*")
+    });
+}
+
+fn ensure_feishu_agent_exists(agent_id: &str) -> Result<(), String> {
+    if collect_agents()
+        .iter()
+        .any(|agent| normalize_agent_id_key(&agent.id) == normalize_agent_id_key(agent_id))
+    {
+        Ok(())
+    } else {
+        Err(format!("未找到 Agent '{}'", agent_id))
+    }
+}
+
+fn upsert_feishu_account_binding(
+    config: &mut serde_json::Value,
+    account_id: &str,
+    agent_id: &str,
+) -> Result<(), String> {
+    let clean_account_id = account_id.trim();
+    let clean_agent_id = agent_id.trim();
+    if clean_account_id.is_empty() {
+        return Err("飞书频道账号 ID 不能为空".to_string());
+    }
+    if clean_agent_id.is_empty() {
+        return Err("绑定的 Agent ID 不能为空".to_string());
+    }
+    ensure_feishu_agent_exists(clean_agent_id)?;
+
+    let binding_map = read_feishu_account_binding_map(config);
+    if let Some(existing_agent_id) = binding_map.get(clean_account_id) {
+        if normalize_agent_id_key(existing_agent_id) != normalize_agent_id_key(clean_agent_id) {
+            return Err(format!(
+                "飞书频道 {} 已绑定 Agent {}，请先解绑后再改绑",
+                clean_account_id, existing_agent_id
+            ));
+        }
+    }
+    if let Some((existing_account_id, _)) = binding_map.iter().find(|(existing_account_id, existing_agent_id)| {
+        normalize_agent_id_key(existing_agent_id) == normalize_agent_id_key(clean_agent_id)
+            && existing_account_id.as_str() != clean_account_id
+    }) {
+        return Err(format!(
+            "Agent {} 已绑定飞书频道 {}，请先解绑后再重新绑定",
+            clean_agent_id, existing_account_id
+        ));
+    }
+
+    if config.get("bindings").is_none() || !config["bindings"].is_array() {
+        config["bindings"] = serde_json::json!([]);
+    }
+
+    let default_account_id = read_feishu_default_account_id(config);
+    if let Some(bindings) = config.get_mut("bindings").and_then(|value| value.as_array_mut()) {
+        bindings.retain(|binding| {
+            if !is_feishu_route_binding(binding) {
+                return true;
+            }
+
+            let binding_agent_id = binding
+                .get("agentId")
+                .and_then(|value| value.as_str())
+                .map(normalize_agent_id_key);
+            if binding_agent_id.as_deref() == Some(&normalize_agent_id_key(clean_agent_id)) {
+                return false;
+            }
+
+            let binding_match = binding.get("match").and_then(|value| value.as_object());
+            let has_peer = binding_match
+                .and_then(|value| value.get("peer"))
+                .is_some();
+            let bound_account_id = binding_match
+                .and_then(|value| value.get("accountId"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && *value != "*")
+                .map(|value| value.to_string())
+                .or_else(|| {
+                    if has_peer {
+                        None
+                    } else {
+                        Some(default_account_id.clone())
+                    }
+                });
+
+            bound_account_id.as_deref() != Some(clean_account_id)
+        });
+
+        bindings.push(serde_json::json!({
+            "agentId": clean_agent_id,
+            "match": {
+                "channel": "feishu",
+                "accountId": clean_account_id,
+            },
+        }));
+    }
+
+    Ok(())
+}
+
+fn save_feishu_account_credentials(
+    config: &mut serde_json::Value,
+    account_id: &str,
+    display_name: Option<&str>,
+    app_id: &str,
+    app_secret: &str,
+    domain: &str,
+    enabled: bool,
+    open_id: Option<String>,
+) {
+    ensure_feishu_channels_config(config);
+    materialize_feishu_root_account_if_needed(config);
+
+    if config.pointer("/channels/feishu/defaultAccount").is_none() {
+        config["channels"]["feishu"]["defaultAccount"] = serde_json::json!(account_id);
+    }
+
+    config["channels"]["feishu"]["enabled"] = serde_json::json!(true);
+    config["channels"]["feishu"]["connectionMode"] = serde_json::json!("websocket");
+    config["channels"]["feishu"]["domain"] = serde_json::json!(domain);
+
+    config["channels"]["feishu"]["accounts"][account_id]["enabled"] = serde_json::json!(enabled);
+    config["channels"]["feishu"]["accounts"][account_id]["appId"] = serde_json::json!(app_id);
+    config["channels"]["feishu"]["accounts"][account_id]["appSecret"] = serde_json::json!(app_secret);
+    config["channels"]["feishu"]["accounts"][account_id]["domain"] = serde_json::json!(domain);
+
+    if let Some(name) = display_name.map(str::trim).filter(|value| !value.is_empty()) {
+        config["channels"]["feishu"]["accounts"][account_id]["name"] = serde_json::json!(name);
+        config["channels"]["feishu"]["accounts"][account_id]["botName"] = serde_json::json!(name);
+    }
+
+    if let Some(open_id_value) = open_id {
+        config["channels"]["feishu"]["dmPolicy"] = serde_json::json!("allowlist");
+        if config.pointer("/channels/feishu/groupPolicy").is_none() {
+            config["channels"]["feishu"]["groupPolicy"] = serde_json::json!("allowlist");
+        }
+        if config.pointer("/channels/feishu/groups").is_none() {
+            config["channels"]["feishu"]["groups"] = serde_json::json!({
+                "*": { "enabled": true }
+            });
+        }
+        ensure_string_array_contains(
+            &mut config["channels"]["feishu"]["allowFrom"],
+            &open_id_value,
+        );
+        ensure_string_array_contains(
+            &mut config["channels"]["feishu"]["groupAllowFrom"],
+            &open_id_value,
+        );
+    } else if config.pointer("/channels/feishu/dmPolicy").is_none() {
+        config["channels"]["feishu"]["dmPolicy"] = serde_json::json!("pairing");
+    }
+
+    if config.pointer("/channels/feishu/groupPolicy").is_none() {
+        config["channels"]["feishu"]["groupPolicy"] = serde_json::json!("open");
+    }
+}
+
+fn save_feishu_channel_binding(
+    account_id: &str,
+    display_name: Option<&str>,
+    app_id: &str,
+    app_secret: &str,
+    domain: &str,
+    agent_id: &str,
+    open_id: Option<String>,
+) -> Result<(), String> {
+    let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    prune_feishu_complex_bindings(&mut config);
+    save_feishu_account_credentials(
+        &mut config,
+        account_id,
+        display_name,
+        app_id,
+        app_secret,
+        domain,
+        true,
+        open_id,
+    );
+    ensure_feishu_plugin_entries(&mut config);
+    upsert_feishu_account_binding(&mut config, account_id, agent_id)?;
+    write_openclaw_config(&config)
+}
+
+fn unbind_feishu_channel_account_internal(account_id: &str) -> Result<(), String> {
+    let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    materialize_feishu_root_account_if_needed(&mut config);
+    prune_feishu_complex_bindings(&mut config);
+    let default_account_id = read_feishu_default_account_id(&config);
+
+    if let Some(bindings) = config.get_mut("bindings").and_then(|value| value.as_array_mut()) {
+        bindings.retain(|binding| {
+            if !is_feishu_route_binding(binding) {
+                return true;
+            }
+
+            let binding_match = binding.get("match").and_then(|value| value.as_object());
+            let has_peer = binding_match
+                .and_then(|value| value.get("peer"))
+                .is_some();
+            let bound_account_id = binding_match
+                .and_then(|value| value.get("accountId"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && *value != "*")
+                .map(|value| value.to_string())
+                .or_else(|| {
+                    if has_peer {
+                        None
+                    } else {
+                        Some(default_account_id.clone())
+                    }
+                });
+
+            bound_account_id.as_deref() != Some(account_id.trim())
+        });
+    }
+
+    if config
+        .pointer("/channels/feishu/accounts")
+        .and_then(|value| value.as_object())
+        .is_some()
+    {
+        config["channels"]["feishu"]["accounts"][account_id.trim()]["enabled"] = serde_json::json!(false);
+    }
+
+    write_openclaw_config(&config)
+}
+
 fn read_feishu_root_config(config: &serde_json::Value) -> (String, String, String, String, bool) {
     let feishu = config
         .pointer("/channels/feishu")
@@ -6069,67 +6565,6 @@ async fn validate_feishu_app_credentials(
     Ok(ok)
 }
 
-fn write_feishu_plugin_binding_config(
-    app_id: &str,
-    app_secret: &str,
-    domain: &str,
-    open_id: Option<String>,
-) -> Result<(), String> {
-    let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
-    if config.get("channels").is_none() || !config["channels"].is_object() {
-        config["channels"] = serde_json::json!({});
-    }
-    if config.pointer("/channels/feishu").is_none() || !config["channels"]["feishu"].is_object() {
-        config["channels"]["feishu"] = serde_json::json!({});
-    }
-
-    if let Some(feishu) = config
-        .pointer_mut("/channels/feishu")
-        .and_then(|value| value.as_object_mut())
-    {
-        feishu.remove("accounts");
-        feishu.remove("defaultAccount");
-        feishu.remove("verificationToken");
-        feishu.remove("encryptKey");
-    }
-
-    config["channels"]["feishu"]["enabled"] = serde_json::json!(true);
-    config["channels"]["feishu"]["appId"] = serde_json::json!(app_id);
-    config["channels"]["feishu"]["appSecret"] = serde_json::json!(app_secret);
-    config["channels"]["feishu"]["domain"] = serde_json::json!(domain);
-    config["channels"]["feishu"]["connectionMode"] = serde_json::json!("websocket");
-    config["channels"]["feishu"]["requireMention"] = serde_json::json!(true);
-
-    if let Some(open_id_value) = open_id {
-        config["channels"]["feishu"]["dmPolicy"] = serde_json::json!("allowlist");
-        if config.pointer("/channels/feishu/groupPolicy").is_none() {
-            config["channels"]["feishu"]["groupPolicy"] = serde_json::json!("allowlist");
-        }
-        if config.pointer("/channels/feishu/groups").is_none() {
-            config["channels"]["feishu"]["groups"] = serde_json::json!({
-                "*": { "enabled": true }
-            });
-        }
-        ensure_string_array_contains(
-            &mut config["channels"]["feishu"]["allowFrom"],
-            &open_id_value,
-        );
-        ensure_string_array_contains(
-            &mut config["channels"]["feishu"]["groupAllowFrom"],
-            &open_id_value,
-        );
-    } else if config.pointer("/channels/feishu/dmPolicy").is_none() {
-        config["channels"]["feishu"]["dmPolicy"] = serde_json::json!("pairing");
-    }
-
-    if config.pointer("/channels/feishu/groupPolicy").is_none() {
-        config["channels"]["feishu"]["groupPolicy"] = serde_json::json!("open");
-    }
-
-    ensure_feishu_plugin_entries(&mut config);
-    write_openclaw_config(&config)
-}
-
 fn restart_gateway_in_background() {
     std::thread::spawn(|| {
         let restart_args = vec!["gateway".to_string(), "restart".to_string()];
@@ -6142,10 +6577,25 @@ async fn bind_existing_feishu_app(
     app_id: String,
     app_secret: String,
     domain: Option<String>,
+    account_id: Option<String>,
+    display_name: Option<String>,
+    agent_id: String,
 ) -> CommandResult {
     let app_id = app_id.trim().to_string();
     let app_secret = app_secret.trim().to_string();
     let domain = normalize_feishu_domain(domain.as_deref()).to_string();
+    let account_id = account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| app_id.clone());
+    let display_name = display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let agent_id = agent_id.trim().to_string();
 
     if app_id.is_empty() {
         return CommandResult {
@@ -6160,6 +6610,14 @@ async fn bind_existing_feishu_app(
             success: false,
             stdout: String::new(),
             stderr: "飞书 App Secret 不能为空".to_string(),
+            code: Some(1),
+        };
+    }
+    if agent_id.is_empty() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "请先选择要绑定的 Agent".to_string(),
             code: Some(1),
         };
     }
@@ -6185,7 +6643,15 @@ async fn bind_existing_feishu_app(
         };
     }
 
-    if let Err(error) = write_feishu_plugin_binding_config(&app_id, &app_secret, &domain, None) {
+    if let Err(error) = save_feishu_channel_binding(
+        &account_id,
+        display_name.as_deref(),
+        &app_id,
+        &app_secret,
+        &domain,
+        &agent_id,
+        None,
+    ) {
         return CommandResult {
             success: false,
             stdout: String::new(),
@@ -6198,7 +6664,10 @@ async fn bind_existing_feishu_app(
 
     CommandResult {
         success: true,
-        stdout: "已有飞书机器人绑定完成，网关正在后台刷新".to_string(),
+        stdout: format!(
+            "飞书频道 {} 已绑定到 Agent {}，网关正在后台刷新",
+            account_id, agent_id
+        ),
         stderr: String::new(),
         code: Some(0),
     }
@@ -6223,6 +6692,19 @@ fn get_feishu_plugin_status() -> CommandResult {
         display_name,
         domain,
     };
+
+    CommandResult {
+        success: true,
+        stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+fn get_feishu_channel_binding_catalog() -> CommandResult {
+    let config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    let payload = collect_feishu_account_binding_catalog(&config);
 
     CommandResult {
         success: true,
@@ -6643,15 +7125,30 @@ fn complete_feishu_plugin_binding(
     app_secret: String,
     domain: Option<String>,
     open_id: Option<String>,
+    account_id: Option<String>,
+    display_name: Option<String>,
+    agent_id: String,
 ) -> CommandResult {
-    let app_id = app_id.trim();
-    let app_secret = app_secret.trim();
+    let app_id = app_id.trim().to_string();
+    let app_secret = app_secret.trim().to_string();
     let domain = normalize_feishu_domain(domain.as_deref()).to_string();
     let open_id = open_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string());
+    let account_id = account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| app_id.clone());
+    let display_name = display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let agent_id = agent_id.trim().to_string();
 
     if app_id.is_empty() {
         return CommandResult {
@@ -6669,8 +7166,24 @@ fn complete_feishu_plugin_binding(
             code: Some(1),
         };
     }
+    if agent_id.is_empty() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "请先选择要绑定的 Agent".to_string(),
+            code: Some(1),
+        };
+    }
 
-    if let Err(error) = write_feishu_plugin_binding_config(app_id, app_secret, &domain, open_id) {
+    if let Err(error) = save_feishu_channel_binding(
+        &account_id,
+        display_name.as_deref(),
+        &app_id,
+        &app_secret,
+        &domain,
+        &agent_id,
+        open_id,
+    ) {
         return CommandResult {
             success: false,
             stdout: String::new(),
@@ -6683,7 +7196,41 @@ fn complete_feishu_plugin_binding(
 
     CommandResult {
         success: true,
-        stdout: "飞书官方插件绑定完成，网关正在后台刷新".to_string(),
+        stdout: format!(
+            "飞书频道 {} 已绑定到 Agent {}，网关正在后台刷新",
+            account_id, agent_id
+        ),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+fn unbind_feishu_channel_account(account_id: String) -> CommandResult {
+    let account_id = account_id.trim().to_string();
+    if account_id.is_empty() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "飞书频道账号 ID 不能为空".to_string(),
+            code: Some(1),
+        };
+    }
+
+    if let Err(error) = unbind_feishu_channel_account_internal(&account_id) {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: error,
+            code: Some(1),
+        };
+    }
+
+    restart_gateway_in_background();
+
+    CommandResult {
+        success: true,
+        stdout: format!("飞书频道 {} 已解绑，网关正在后台刷新", account_id),
         stderr: String::new(),
         code: Some(0),
     }
@@ -7758,11 +8305,13 @@ pub fn run() {
             open_feishu_plugin_terminal,
             bind_existing_feishu_app,
             get_feishu_plugin_status,
+            get_feishu_channel_binding_catalog,
             get_feishu_multi_agent_bindings,
             install_feishu_plugin,
             start_feishu_auth_session,
             poll_feishu_auth_session,
             complete_feishu_plugin_binding,
+            unbind_feishu_channel_account,
             list_channels,
             list_channels_snapshot,
             get_feishu_channel_config,
