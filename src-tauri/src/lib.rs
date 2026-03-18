@@ -3151,34 +3151,22 @@ fn seed_agent_workspace(workspace_dir: &Path, agent_id: &str) -> Result<Vec<Stri
 
 fn apply_agent_workspace_overrides(
     workspace_dir: &Path,
-    seeded_files: &[String],
     workspace_files: Option<&BTreeMap<String, String>>,
-) -> Result<(Vec<String>, Vec<String>), String> {
+) -> Result<Vec<String>, String> {
     let Some(workspace_files) = workspace_files.filter(|value| !value.is_empty()) else {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(Vec::new());
     };
-
-    let seeded = seeded_files
-        .iter()
-        .map(|value| value.as_str())
-        .collect::<BTreeSet<_>>();
     let mut written = Vec::new();
-    let mut skipped_existing = Vec::new();
 
     for (file_name, content) in workspace_files {
         let allowed_file = ensure_allowed_agent_workspace_file(file_name)?;
-        if !seeded.contains(allowed_file) {
-            skipped_existing.push(allowed_file.to_string());
-            continue;
-        }
-
         let target_path = workspace_dir.join(allowed_file);
         std::fs::write(&target_path, content)
             .map_err(|error| format!("无法写入预设文件 {}: {}", target_path.display(), error))?;
         written.push(allowed_file.to_string());
     }
 
-    Ok((written, skipped_existing))
+    Ok(written)
 }
 
 fn is_valid_agent_id(id: &str) -> bool {
@@ -4116,9 +4104,8 @@ async fn create_agent(
             }
         };
 
-        let (preset_files_written, preset_files_skipped) = match apply_agent_workspace_overrides(
+        let preset_files_written = match apply_agent_workspace_overrides(
             &created_workspace,
-            &seeded_files,
             workspace_files.as_ref(),
         ) {
             Ok(result) => result,
@@ -4187,12 +4174,6 @@ async fn create_agent(
         }
         if !preset_files_written.is_empty() {
             notes.push(format!("已写入预设 {}", preset_files_written.join(", ")));
-        }
-        if !preset_files_skipped.is_empty() {
-            notes.push(format!(
-                "未覆盖已存在文件 {}",
-                preset_files_skipped.join(", ")
-            ));
         }
 
         CommandResult {
