@@ -2058,21 +2058,46 @@ async fn run_install_command(
         });
 
         let result = if effective_install_method == "official_script" {
-            let script = if os_str == "windows" {
-                "set \"SHARP_IGNORE_GLOBAL_LIBVIPS=1\"&& \
-                 powershell -ExecutionPolicy Bypass -NoProfile -Command \
-                 \"& ([scriptblock]::Create((iwr -useb https://openclaw.ai/install.ps1))) -InstallMethod npm -NoOnboard\""
-                    .to_string()
-            } else {
-                "curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard --no-prompt --install-method npm".to_string()
-            };
-
             let _ = app.emit("install-log", InstallEvent {
                 level: "info".into(),
                 message: "使用官方安装脚本安装 OpenClaw CLI...".into(),
             });
 
-            stream_script(&app, &script, &[], None)
+            if os_str == "windows" {
+                let powershell_program = if command_exists("powershell") {
+                    "powershell"
+                } else if command_exists("pwsh") {
+                    "pwsh"
+                } else {
+                    let message = "未找到 PowerShell（powershell / pwsh），无法执行官方安装脚本".to_string();
+                    let _ = app.emit("install-log", InstallEvent {
+                        level: "error".into(),
+                        message: message.clone(),
+                    });
+                    return CommandResult {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: message,
+                        code: Some(1),
+                    };
+                };
+
+                let ps_command = "$ErrorActionPreference='Stop'; \
+                    $ProgressPreference='SilentlyContinue'; \
+                    $scriptText = Invoke-RestMethod -Uri 'https://openclaw.ai/install.ps1' -ErrorAction Stop; \
+                    & ([scriptblock]::Create($scriptText)) -InstallMethod npm -NoOnboard *>&1 | ForEach-Object { $_.ToString() }";
+                let ps_args = vec![
+                    "-NoProfile".to_string(),
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
+                    "-Command".to_string(),
+                    ps_command.to_string(),
+                ];
+                stream_command(&app, powershell_program, &ps_args, &[], None)
+            } else {
+                let script = "curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard --no-prompt --install-method npm";
+                stream_script(&app, script, &[], None)
+            }
         } else {
             let npm_version = npm_version_for_install.unwrap_or_else(|| "unknown".to_string());
             let _ = app.emit("install-log", InstallEvent {
@@ -2178,9 +2203,24 @@ async fn run_install_command(
         });
 
         if !result.success {
+            let exit_code = result
+                .code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let failure_reason = if !result.stderr.is_empty() {
+                first_meaningful_line(&result.stderr)
+            } else if !result.stdout.is_empty() {
+                first_meaningful_line(&result.stdout)
+            } else {
+                "未输出可读日志".to_string()
+            };
             let _ = app.emit("install-log", InstallEvent {
                 level: "warn".into(),
-                message: "安装脚本返回非零退出码，继续检查实际安装结果".into(),
+                message: format!(
+                    "安装脚本返回非零退出码 (code={})：{}；继续检查实际安装结果",
+                    exit_code,
+                    failure_reason
+                ),
             });
         }
 
