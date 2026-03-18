@@ -3279,7 +3279,12 @@ fn parse_json_value_from_output(output: &str) -> Option<serde_json::Value> {
         return None;
     }
 
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+    let parse_one = |input: &str| {
+        let mut deserializer = serde_json::Deserializer::from_str(input);
+        serde_json::Value::deserialize(&mut deserializer).ok()
+    };
+
+    if let Some(value) = parse_one(trimmed) {
         return Some(value);
     }
 
@@ -3287,7 +3292,7 @@ fn parse_json_value_from_output(output: &str) -> Option<serde_json::Value> {
         if ch != '{' && ch != '[' {
             return None;
         }
-        serde_json::from_str::<serde_json::Value>(&trimmed[index..]).ok()
+        parse_one(&trimmed[index..])
     })
 }
 
@@ -4060,7 +4065,9 @@ fn parse_command_json<T: DeserializeOwned>(
         return Err(format!("{}: 返回为空", label));
     }
 
-    serde_json::from_str(stdout).map_err(|error| format!("{}: {}", label, error))
+    let payload = parse_json_value_from_output(stdout)
+        .ok_or_else(|| format!("{}: 返回内容不是合法 JSON", label))?;
+    serde_json::from_value(payload).map_err(|error| format!("{}: {}", label, error))
 }
 
 fn read_skill_origin(entry_path: &Path) -> Option<SkillOriginRecord> {
