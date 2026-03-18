@@ -1,6 +1,6 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -3149,6 +3149,38 @@ fn seed_agent_workspace(workspace_dir: &Path, agent_id: &str) -> Result<Vec<Stri
     Ok(created)
 }
 
+fn apply_agent_workspace_overrides(
+    workspace_dir: &Path,
+    seeded_files: &[String],
+    workspace_files: Option<&BTreeMap<String, String>>,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let Some(workspace_files) = workspace_files.filter(|value| !value.is_empty()) else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+
+    let seeded = seeded_files
+        .iter()
+        .map(|value| value.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut written = Vec::new();
+    let mut skipped_existing = Vec::new();
+
+    for (file_name, content) in workspace_files {
+        let allowed_file = ensure_allowed_agent_workspace_file(file_name)?;
+        if !seeded.contains(allowed_file) {
+            skipped_existing.push(allowed_file.to_string());
+            continue;
+        }
+
+        let target_path = workspace_dir.join(allowed_file);
+        std::fs::write(&target_path, content)
+            .map_err(|error| format!("无法写入预设文件 {}: {}", target_path.display(), error))?;
+        written.push(allowed_file.to_string());
+    }
+
+    Ok((written, skipped_existing))
+}
+
 fn is_valid_agent_id(id: &str) -> bool {
     !id.is_empty()
         && id
@@ -3267,6 +3299,14 @@ fn agent_description_from_workspace(workspace: &str) -> String {
     }
 }
 
+fn agent_description_from_config_item(item: Option<&serde_json::Value>, workspace: &str) -> String {
+    item.and_then(|value| value.get("description").and_then(|entry| entry.as_str()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| agent_description_from_workspace(workspace))
+}
+
 fn default_agents_workspace(config: Option<&serde_json::Value>) -> String {
     config
         .and_then(|value| value.pointer("/agents/defaults/workspace"))
@@ -3328,7 +3368,7 @@ fn agent_info_from_config_item(
         id: id.clone(),
         name,
         model: agent_model_from_config(item, default_model),
-        description: agent_description_from_workspace(&workspace),
+        description: agent_description_from_config_item(Some(item), &workspace),
         path: agent_root_from_agent_dir(&id, &agent_dir),
         workspace,
         agent_dir: agent_dir.clone(),
@@ -3381,8 +3421,15 @@ fn verify_created_agent(
                     .is_some();
 
                 if !config_has_entry {
-                    let _ =
-                        ensure_agent_config_entry(agent_id, workspace, agent_dir, model, bindings);
+                    let _ = ensure_agent_config_entry(
+                        agent_id,
+                        None,
+                        None,
+                        workspace,
+                        agent_dir,
+                        model,
+                        bindings,
+                    );
 
                     if let Some(config_after_sync) = read_openclaw_config() {
                         if let Some(config_agent) =
@@ -3428,6 +3475,8 @@ fn list_agents_from_config_value(config: &serde_json::Value) -> Vec<AgentInfo> {
 
 fn ensure_agent_config_entry(
     agent_id: &str,
+    name: Option<&str>,
+    description: Option<&str>,
     workspace: &Path,
     agent_dir: &Path,
     model: Option<&str>,
@@ -3450,6 +3499,14 @@ fn ensure_agent_config_entry(
 
     let workspace_str = workspace.to_string_lossy().to_string();
     let agent_dir_str = agent_dir.to_string_lossy().to_string();
+    let name_value = name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let description_value = description
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
     let model_value = model
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -3476,6 +3533,17 @@ fn ensure_agent_config_entry(
             serde_json::Value::String(agent_dir_str),
         );
 
+        if let Some(name_value) = name_value.clone() {
+            object.insert("name".to_string(), serde_json::Value::String(name_value));
+        }
+
+        if let Some(description_value) = description_value.clone() {
+            object.insert(
+                "description".to_string(),
+                serde_json::Value::String(description_value),
+            );
+        }
+
         if let Some(model_value) = model_value {
             object.insert("model".to_string(), serde_json::Value::String(model_value));
         }
@@ -3497,6 +3565,17 @@ fn ensure_agent_config_entry(
             "agentDir".to_string(),
             serde_json::Value::String(agent_dir_str),
         );
+
+        if let Some(name_value) = name_value {
+            entry.insert("name".to_string(), serde_json::Value::String(name_value));
+        }
+
+        if let Some(description_value) = description_value {
+            entry.insert(
+                "description".to_string(),
+                serde_json::Value::String(description_value),
+            );
+        }
 
         if let Some(model_value) = model_value {
             entry.insert("model".to_string(), serde_json::Value::String(model_value));
@@ -3586,13 +3665,14 @@ fn list_agents_from_cli(config: Option<&serde_json::Value>) -> Result<Vec<AgentI
             .or_else(|| item.get("name").and_then(|value| value.as_str()))
             .unwrap_or(&id)
             .to_string();
+        let description = agent_description_from_config_item(config_item, &workspace);
 
         seen_ids.insert(id.clone());
         agents.push(AgentInfo {
             id: id.clone(),
             name,
             model,
-            description: agent_description_from_workspace(&workspace),
+            description,
             path: agent_root_from_agent_dir(&id, &agent_dir),
             workspace,
             agent_dir: agent_dir.clone(),
@@ -3793,10 +3873,13 @@ fn list_agents() -> Vec<AgentInfo> {
 #[tauri::command]
 async fn create_agent(
     id: String,
+    name: Option<String>,
+    description: Option<String>,
     model: Option<String>,
     workspace: Option<String>,
     agent_dir: Option<String>,
     bindings: Option<Vec<String>>,
+    workspace_files: Option<BTreeMap<String, String>>,
 ) -> CommandResult {
     tokio::task::spawn_blocking(move || {
         let requested_id = id.trim().to_string();
@@ -3810,6 +3893,16 @@ async fn create_agent(
         }
 
         let agent_id = normalize_agent_id_key(&requested_id);
+        let cleaned_name = name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        let cleaned_description = description
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
 
         let _create_guard = match AgentCreateGuard::acquire(&agent_id) {
             Ok(guard) => guard,
@@ -4023,8 +4116,30 @@ async fn create_agent(
             }
         };
 
+        let (preset_files_written, preset_files_skipped) = match apply_agent_workspace_overrides(
+            &created_workspace,
+            &seeded_files,
+            workspace_files.as_ref(),
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                return CommandResult {
+                    success: false,
+                    stdout: format!(
+                        "Agent '{}' 已创建，但预设写入失败：{}",
+                        created_agent_id,
+                        created_workspace.display(),
+                    ),
+                    stderr: error,
+                    code: Some(1),
+                };
+            }
+        };
+
         if let Err(error) = ensure_agent_config_entry(
             &created_agent_id,
+            cleaned_name.as_deref(),
+            cleaned_description.as_deref(),
             &created_workspace,
             &created_agent_dir,
             created_model.as_deref(),
@@ -4064,17 +4179,30 @@ async fn create_agent(
             }
         };
 
-        let scaffold_note = if seeded_files.is_empty() {
-            "工作区基础文件已存在".to_string()
+        let mut notes = Vec::new();
+        if seeded_files.is_empty() {
+            notes.push("工作区基础文件已存在".to_string());
         } else {
-            format!("已补齐 {}", seeded_files.join(", "))
-        };
+            notes.push(format!("已补齐 {}", seeded_files.join(", ")));
+        }
+        if !preset_files_written.is_empty() {
+            notes.push(format!("已写入预设 {}", preset_files_written.join(", ")));
+        }
+        if !preset_files_skipped.is_empty() {
+            notes.push(format!(
+                "未覆盖已存在文件 {}",
+                preset_files_skipped.join(", ")
+            ));
+        }
 
         CommandResult {
             success: true,
             stdout: format!(
                 "已创建 Agent '{}'，工作区 {}，Agent 目录 {}，{}",
-                created.id, created.workspace, created.agent_dir, scaffold_note
+                created.id,
+                created.workspace,
+                created.agent_dir,
+                notes.join("；")
             ),
             stderr: String::new(),
             code: Some(0),

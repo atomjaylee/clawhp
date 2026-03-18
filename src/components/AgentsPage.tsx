@@ -36,6 +36,33 @@ interface AgentWorkspaceSnapshot {
   files: AgentWorkspaceFile[];
 }
 
+interface AgentPreset {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  categoryLabel: string;
+  sourcePath: string;
+  files: Record<string, string>;
+}
+
+interface AgentPresetCategory {
+  id: string;
+  label: string;
+  count: number;
+}
+
+interface AgentPresetCatalog {
+  sourceRepo: string;
+  generatedAt: string;
+  count: number;
+  categories: AgentPresetCategory[];
+  presets: AgentPreset[];
+}
+
+const PRESET_CATEGORY_ALL = "__all__";
+const PRESET_FILE_NAMES = ["SOUL.md", "AGENTS.md", "IDENTITY.md"] as const;
+
 const WORKSPACE_FILE_DEFS = [
   { name: "AGENTS.md", title: "协作规则", description: "定义这个 Agent 的职责边界、子代理策略和协作方式。" },
   { name: "SOUL.md", title: "人格与风格", description: "定义语气、偏好、目标和这个 Agent 的长期气质。" },
@@ -60,10 +87,17 @@ export default function AgentsPage() {
   const [createError, setCreateError] = useState("");
   const [createSuccess, setCreateSuccess] = useState("");
   const [agentId, setAgentId] = useState("");
+  const [agentName, setAgentName] = useState("");
   const [agentModel, setAgentModel] = useState("");
   const [workspacePath, setWorkspacePath] = useState("");
   const [agentDirPath, setAgentDirPath] = useState("");
   const [bindingsText, setBindingsText] = useState("");
+  const [presetCatalog, setPresetCatalog] = useState<AgentPresetCatalog | null>(null);
+  const [presetLoading, setPresetLoading] = useState(false);
+  const [presetError, setPresetError] = useState("");
+  const [selectedPresetId, setSelectedPresetId] = useState("");
+  const [presetQuery, setPresetQuery] = useState("");
+  const [presetCategory, setPresetCategory] = useState(PRESET_CATEGORY_ALL);
 
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [workspaceSnapshot, setWorkspaceSnapshot] = useState<AgentWorkspaceSnapshot | null>(null);
@@ -112,6 +146,23 @@ export default function AgentsPage() {
       setModelOptions([]);
     }
   }, [primaryModel]);
+
+  const loadAgentPresets = useCallback(async () => {
+    if (presetCatalog || presetLoading) {
+      return;
+    }
+
+    setPresetLoading(true);
+    setPresetError("");
+    try {
+      const catalogModule = await import("@/data/agent-presets.json");
+      setPresetCatalog(catalogModule.default as AgentPresetCatalog);
+    } catch (error) {
+      setPresetError(`角色预设加载失败: ${error}`);
+    } finally {
+      setPresetLoading(false);
+    }
+  }, [presetCatalog, presetLoading]);
 
   const applyWorkspaceSnapshot = useCallback((snapshot: AgentWorkspaceSnapshot) => {
     setWorkspaceSnapshot(snapshot);
@@ -215,7 +266,8 @@ export default function AgentsPage() {
       return;
     }
     void loadModelOptions();
-  }, [createDialogOpen, loadModelOptions]);
+    void loadAgentPresets();
+  }, [createDialogOpen, loadAgentPresets, loadModelOptions]);
 
   useEffect(() => {
     if (!modelMenuOpen) {
@@ -245,6 +297,47 @@ export default function AgentsPage() {
   }, [workspaceSnapshot?.agentId, workspaceSnapshot?.selectedFileName, workspaceSnapshot?.selectedFileContent]);
 
   const selectedModel = modelOptions.find((option) => option.value === agentModel) ?? null;
+  const selectedPreset = useMemo(
+    () => presetCatalog?.presets.find((preset) => preset.id === selectedPresetId) ?? null,
+    [presetCatalog, selectedPresetId],
+  );
+  const presetCategoryOptions = useMemo(() => {
+    if (!presetCatalog) {
+      return [{ id: PRESET_CATEGORY_ALL, label: "全部", count: 0 }];
+    }
+
+    return [
+      { id: PRESET_CATEGORY_ALL, label: "全部", count: presetCatalog.count },
+      ...presetCatalog.categories,
+    ];
+  }, [presetCatalog]);
+  const filteredPresets = useMemo(() => {
+    if (!presetCatalog) {
+      return [];
+    }
+
+    const query = presetQuery.trim().toLowerCase();
+    return presetCatalog.presets.filter((preset) => {
+      if (presetCategory !== PRESET_CATEGORY_ALL && preset.category !== presetCategory) {
+        return false;
+      }
+
+      if (!query) {
+        return true;
+      }
+
+      const haystack = [
+        preset.id,
+        preset.name,
+        preset.description,
+        preset.category,
+        preset.categoryLabel,
+        preset.sourcePath,
+      ].join("\n").toLowerCase();
+
+      return haystack.includes(query);
+    });
+  }, [presetCatalog, presetCategory, presetQuery]);
   const selectedModelLabel = selectedModel?.value || primaryModel || "沿用当前默认模型";
   const suggestedRoot = agentId.trim() ? `~/.openclaw/agents/${agentId.trim()}` : "~/.openclaw/agents/<agent-id>";
   const suggestedWorkspace = workspacePath.trim() || `${suggestedRoot}/workspace`;
@@ -278,20 +371,34 @@ export default function AgentsPage() {
     setPendingDeleteAgent(agent);
   };
 
+  const handleSelectPreset = (preset: AgentPreset) => {
+    setSelectedPresetId(preset.id);
+    setAgentId(preset.id);
+    setAgentName(preset.name);
+    setCreateError("");
+    setCreateSuccess("");
+  };
+
   const resetCreateForm = () => {
     setAgentId("");
+    setAgentName("");
     setAgentModel("");
     setWorkspacePath("");
     setAgentDirPath("");
     setBindingsText("");
     setCreateError("");
     setCreateSuccess("");
+    setPresetError("");
+    setSelectedPresetId("");
+    setPresetQuery("");
+    setPresetCategory(PRESET_CATEGORY_ALL);
     setAdvancedOpen(false);
     setModelMenuOpen(false);
   };
 
   const openCreateDialog = () => {
     setCreateError("");
+    setPresetError("");
     setModelMenuOpen(false);
     setCreateDialogOpen(true);
   };
@@ -341,10 +448,13 @@ export default function AgentsPage() {
     try {
       const result: CommandResult = await invoke("create_agent", {
         id: trimmedId,
+        name: agentName.trim() || null,
+        description: selectedPreset?.description || null,
         model: agentModel.trim() || null,
         workspace: workspacePath.trim() || null,
         agentDir: agentDirPath.trim() || null,
         bindings: parseBindings(bindingsText),
+        workspaceFiles: selectedPreset?.files ?? null,
       });
 
       if (!result.success) {
@@ -355,10 +465,14 @@ export default function AgentsPage() {
       setCreateSuccess(result.stdout || `已创建 Agent "${trimmedId}"`);
       setCreateDialogOpen(false);
       setAgentId("");
+      setAgentName("");
       setAgentModel("");
       setWorkspacePath("");
       setAgentDirPath("");
       setBindingsText("");
+      setSelectedPresetId("");
+      setPresetQuery("");
+      setPresetCategory(PRESET_CATEGORY_ALL);
       setModelMenuOpen(false);
       setAdvancedOpen(false);
       delete workspaceCacheRef.current[trimmedId.toLowerCase()];
@@ -680,7 +794,7 @@ export default function AgentsPage() {
           onClick={closeCreateDialog}
         >
           <Card
-            className="w-full max-w-3xl border-white/[0.08] bg-[#081017] shadow-2xl shadow-black/40"
+            className="w-full max-w-5xl border-white/[0.08] bg-[#081017] shadow-2xl shadow-black/40"
             onClick={(event) => event.stopPropagation()}
           >
             <CardContent className="max-h-[85vh] overflow-auto p-5 space-y-4">
@@ -691,9 +805,9 @@ export default function AgentsPage() {
                       <UserPlus size={15} className="text-sky-400" />
                     </div>
                     <div>
-                      <h3 className="text-[13px] font-semibold">手动创建 Agent</h3>
+                      <h3 className="text-[13px] font-semibold">新建 Agent</h3>
                       <p className="text-[11px] text-muted-foreground">
-                        按官方 `openclaw agents add` 的方式创建，每个 Agent 默认使用独立的 workspace 和 agentDir。
+                        支持从角色预设一键带入人格和规则，也支持继续手动填写；底层仍按官方 `openclaw agents add` 创建独立 Agent。
                       </p>
                     </div>
                   </div>
@@ -709,17 +823,160 @@ export default function AgentsPage() {
                 </div>
               </div>
 
-              <div className="grid gap-3 md:grid-cols-2">
+              <div className="rounded-2xl border border-sky-500/15 bg-sky-500/[0.04] p-4">
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[13px] font-semibold">角色预设库</span>
+                      <Badge className="h-5 border-0 bg-sky-500/10 px-2 text-[10px] text-sky-300">
+                        {presetCatalog ? `${presetCatalog.count} 个角色` : "加载中"}
+                      </Badge>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      选择后会自动填充 Agent ID 和显示名称，并在创建时把预设内容写入 `SOUL.md`、`AGENTS.md`、`IDENTITY.md`。
+                    </p>
+                  </div>
+                  {selectedPreset && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-8 px-2 text-[12px]"
+                      onClick={() => setSelectedPresetId("")}
+                    >
+                      取消预设关联
+                    </Button>
+                  )}
+                </div>
+
+                <div className="mt-4 grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
+                  <div className="space-y-3">
+                    <div>
+                      <label className="mb-1.5 block text-[12px] text-muted-foreground">搜索角色</label>
+                      <input
+                        className={inputCls}
+                        placeholder="按角色名、分类、关键词搜索"
+                        value={presetQuery}
+                        onChange={(event) => setPresetQuery(event.target.value)}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="mb-1.5 block text-[12px] text-muted-foreground">角色分类</label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {presetCategoryOptions.map((option) => {
+                          const active = option.id === presetCategory;
+                          return (
+                            <button
+                              key={option.id}
+                              type="button"
+                              className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                                active
+                                  ? "border-sky-500/35 bg-sky-500/12 text-sky-300"
+                                  : "border-white/[0.08] bg-white/[0.03] text-muted-foreground hover:border-white/[0.16] hover:text-foreground/80"
+                              }`}
+                              onClick={() => setPresetCategory(option.id)}
+                            >
+                              {option.label} {option.count > 0 ? `(${option.count})` : ""}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                      {selectedPreset ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <p className="text-[13px] font-semibold text-foreground/90">{selectedPreset.name}</p>
+                              <p className="font-mono text-[11px] text-muted-foreground">{selectedPreset.id}</p>
+                            </div>
+                            <Badge className="h-5 border-0 bg-white/[0.06] px-2 text-[10px] text-foreground/75">
+                              {selectedPreset.categoryLabel}
+                            </Badge>
+                          </div>
+                          <p className="text-[11px] leading-5 text-muted-foreground">
+                            {selectedPreset.description}
+                          </p>
+                          <div className="space-y-1.5 border-t border-white/[0.06] pt-2 text-[11px] text-muted-foreground">
+                            <InfoRow label="来源" value={selectedPreset.sourcePath} />
+                            <InfoRow label="预设文件" value={PRESET_FILE_NAMES.join(", ")} />
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-1">
+                          <p className="text-[12px] font-medium text-foreground/80">还没有选择角色</p>
+                          <p className="text-[11px] leading-5 text-muted-foreground">
+                            可以直接挑一个专家角色开始，也可以完全手动创建。选中预设后，下面的字段仍然可以继续改。
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/[0.06] bg-black/10">
+                    <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] px-4 py-3">
+                      <div>
+                        <h4 className="text-[13px] font-semibold">可选角色</h4>
+                        <p className="text-[11px] text-muted-foreground">
+                          {presetCatalog ? `当前匹配 ${filteredPresets.length} / ${presetCatalog.count}` : "准备加载预设中"}
+                        </p>
+                      </div>
+                    </div>
+                    {presetLoading ? (
+                      <div className="flex items-center justify-center py-16 text-muted-foreground">
+                        <Loader2 size={18} className="mr-2 animate-spin" />
+                        <span className="text-[13px]">正在加载角色预设...</span>
+                      </div>
+                    ) : presetError ? (
+                      <div className="px-4 py-6 text-[12px] text-red-300">{presetError}</div>
+                    ) : (
+                      <ScrollArea className="h-[320px]">
+                        {filteredPresets.length === 0 ? (
+                          <div className="px-4 py-10 text-center text-[12px] text-muted-foreground">
+                            当前筛选条件下没有匹配角色。
+                          </div>
+                        ) : (
+                          <div className="grid gap-2 p-3 sm:grid-cols-2">
+                            {filteredPresets.map((preset) => (
+                              <PresetCard
+                                key={preset.id}
+                                preset={preset}
+                                selected={preset.id === selectedPresetId}
+                                onSelect={() => handleSelectPreset(preset)}
+                              />
+                            ))}
+                          </div>
+                        )}
+                      </ScrollArea>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)]">
                 <div>
                   <label className="mb-1.5 block text-[12px] text-muted-foreground">Agent ID</label>
                   <input
                     className={inputCls}
-                    placeholder="例如 sales-bot"
+                    placeholder={selectedPreset?.id ?? "例如 sales-bot"}
                     value={agentId}
                     onChange={(event) => setAgentId(event.target.value)}
                   />
                   <p className="mt-1 text-[11px] text-muted-foreground">
-                    建议使用英文、数字、`-`、`_`，每个 ID 都会拥有自己的独立目录。
+                    建议使用英文、数字、`-`、`_`；选择预设后会先自动填入一个安全的默认 ID。
+                  </p>
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-[12px] text-muted-foreground">显示名称</label>
+                  <input
+                    className={inputCls}
+                    placeholder={selectedPreset?.name ?? "例如 销售教练"}
+                    value={agentName}
+                    onChange={(event) => setAgentName(event.target.value)}
+                  />
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    会保存到本地 Agent 配置里，用于列表展示。预设角色默认会填入中文名称。
                   </p>
                 </div>
                 <div>
@@ -795,8 +1052,10 @@ export default function AgentsPage() {
                   <span className="font-medium">独立目录预览</span>
                 </div>
                 <div className="space-y-1.5">
+                  <InfoRow label="Name" value={agentName.trim() || "未设置，默认用 Agent ID"} />
                   <InfoRow label="Workspace" value={suggestedWorkspace} />
                   <InfoRow label="Agent Dir" value={suggestedAgentDir} />
+                  <InfoRow label="Preset" value={selectedPreset ? `${selectedPreset.name} (${selectedPreset.id})` : "未选择，按手动模式创建"} />
                   <InfoRow
                     label="Bindings"
                     value={parsedBindings.length > 0 ? parsedBindings.join(", ") : "未配置，后续可在 OpenClaw 中继续补充"}
@@ -866,7 +1125,7 @@ export default function AgentsPage() {
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" onClick={() => void handleCreate()} disabled={creating || !agentId.trim()}>
                   {creating ? <Loader2 className="animate-spin" /> : <UserPlus />}
-                  {creating ? "创建中..." : "创建 Agent"}
+                  {creating ? "创建中..." : selectedPreset ? "用预设创建 Agent" : "创建 Agent"}
                 </Button>
                 <Button
                   size="sm"
@@ -1003,6 +1262,44 @@ function AgentListItem({
           </div>
         </div>
       )}
+    </button>
+  );
+}
+
+function PresetCard({
+  preset,
+  selected,
+  onSelect,
+}: {
+  preset: AgentPreset;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`w-full rounded-xl border px-3 py-3 text-left transition-colors ${
+        selected
+          ? "border-sky-500/35 bg-sky-500/[0.08]"
+          : "border-white/[0.08] bg-white/[0.02] hover:border-white/[0.16] hover:bg-white/[0.04]"
+      }`}
+      onClick={onSelect}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-[13px] font-medium text-foreground/90">{preset.name}</p>
+          <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{preset.id}</p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Badge className="h-4 border-0 bg-white/[0.06] px-1.5 text-[10px] text-foreground/70">
+            {preset.categoryLabel}
+          </Badge>
+          <Check size={13} className={selected ? "text-sky-300" : "text-transparent"} />
+        </div>
+      </div>
+      <p className="mt-2 line-clamp-3 text-[11px] leading-5 text-muted-foreground">
+        {preset.description}
+      </p>
     </button>
   );
 }
