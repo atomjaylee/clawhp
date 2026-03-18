@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, AppHandle};
+use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SystemInfo {
@@ -156,9 +156,7 @@ fn detect_path() -> String {
 
     if let Ok(out) = output {
         let text = String::from_utf8_lossy(&out.stdout);
-        if let (Some(start), Some(end)) =
-            (text.find("__PATH_START__"), text.find("__PATH_END__"))
-        {
+        if let (Some(start), Some(end)) = (text.find("__PATH_START__"), text.find("__PATH_END__")) {
             let path = &text[start + 14..end];
             if !path.is_empty() {
                 return append_known_path_entries(path.to_string());
@@ -292,7 +290,8 @@ fn run_cmd_owned_timeout(program: &str, args: &[String], timeout: Duration) -> C
                         Ok(output) => {
                             let stdout = clean_line(&String::from_utf8_lossy(&output.stdout));
                             let stderr = clean_line(&String::from_utf8_lossy(&output.stderr));
-                            let timeout_message = format!("命令执行超时（{} 秒）", timeout.as_secs());
+                            let timeout_message =
+                                format!("命令执行超时（{} 秒）", timeout.as_secs());
                             let combined_stderr = if stderr.is_empty() {
                                 timeout_message
                             } else {
@@ -308,7 +307,11 @@ fn run_cmd_owned_timeout(program: &str, args: &[String], timeout: Duration) -> C
                         Err(e) => CommandResult {
                             success: false,
                             stdout: String::new(),
-                            stderr: format!("命令执行超时（{} 秒）且无法读取输出: {}", timeout.as_secs(), e),
+                            stderr: format!(
+                                "命令执行超时（{} 秒）且无法读取输出: {}",
+                                timeout.as_secs(),
+                                e
+                            ),
                             code: None,
                         },
                     };
@@ -328,19 +331,32 @@ fn run_cmd_owned_timeout(program: &str, args: &[String], timeout: Duration) -> C
 }
 
 fn emit_install_event(app: &AppHandle, event_name: &str, level: &str, message: impl Into<String>) {
-    let _ = app.emit(event_name, InstallEvent {
-        level: level.to_string(),
-        message: message.into(),
-    });
+    let _ = app.emit(
+        event_name,
+        InstallEvent {
+            level: level.to_string(),
+            message: message.into(),
+        },
+    );
 }
 
 fn emit_command_result(app: &AppHandle, event_name: &str, result: &CommandResult) {
-    for line in result.stdout.lines().map(clean_line).filter(|line| !line.is_empty()) {
+    for line in result
+        .stdout
+        .lines()
+        .map(clean_line)
+        .filter(|line| !line.is_empty())
+    {
         emit_install_event(app, event_name, "info", line);
     }
 
     let stderr_level = if result.success { "warn" } else { "error" };
-    for line in result.stderr.lines().map(clean_line).filter(|line| !line.is_empty()) {
+    for line in result
+        .stderr
+        .lines()
+        .map(clean_line)
+        .filter(|line| !line.is_empty())
+    {
         emit_install_event(app, event_name, stderr_level, line);
     }
 }
@@ -375,8 +391,8 @@ fn candidate_program_names(program: &str) -> Vec<String> {
     names.insert(program.to_string());
 
     if cfg!(target_os = "windows") {
-        let pathext = std::env::var("PATHEXT")
-            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD;.PS1".to_string());
+        let pathext =
+            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD;.PS1".to_string());
         for ext in pathext.split(';') {
             let trimmed = ext.trim();
             if trimmed.is_empty() {
@@ -485,7 +501,11 @@ async fn check_system() -> SystemInfo {
 
         let gateway_status_result = if openclaw_cli_ok {
             run_openclaw_args_timeout(
-                &["gateway".to_string(), "status".to_string(), "--json".to_string()],
+                &[
+                    "gateway".to_string(),
+                    "status".to_string(),
+                    "--json".to_string(),
+                ],
                 Duration::from_secs(6),
             )
         } else {
@@ -504,22 +524,36 @@ async fn check_system() -> SystemInfo {
 
         let local_openclaw_home = get_openclaw_home();
         let local_openclaw_home_path = Path::new(&local_openclaw_home);
-        let local_openclaw_home_exists = local_openclaw_home_path.exists() && local_openclaw_home_path.is_dir();
+        let local_openclaw_home_exists =
+            local_openclaw_home_path.exists() && local_openclaw_home_path.is_dir();
 
         let local_openclaw_config_path = get_openclaw_config_path();
         let cli_reported_config_path = gateway_status_json
             .as_ref()
-            .and_then(|value| value.pointer("/config/cli/path").and_then(|entry| entry.as_str()))
+            .and_then(|value| {
+                value
+                    .pointer("/config/cli/path")
+                    .and_then(|entry| entry.as_str())
+            })
             .map(PathBuf::from);
         let cli_reported_config_exists = gateway_status_json
             .as_ref()
-            .and_then(|value| value.pointer("/config/cli/exists").and_then(|entry| entry.as_bool()))
-            .unwrap_or_else(|| cli_reported_config_path.as_ref().is_some_and(|path| path.is_file()));
+            .and_then(|value| {
+                value
+                    .pointer("/config/cli/exists")
+                    .and_then(|entry| entry.as_bool())
+            })
+            .unwrap_or_else(|| {
+                cli_reported_config_path
+                    .as_ref()
+                    .is_some_and(|path| path.is_file())
+            });
 
         let effective_config_path = local_openclaw_config_path
             .clone()
             .or(cli_reported_config_path);
-        let openclaw_config_exists = local_openclaw_config_path.is_some() || cli_reported_config_exists;
+        let openclaw_config_exists =
+            local_openclaw_config_path.is_some() || cli_reported_config_exists;
         let openclaw_config_path = effective_config_path
             .as_ref()
             .map(|path| path.to_string_lossy().to_string());
@@ -541,7 +575,11 @@ async fn check_system() -> SystemInfo {
             .or_else(|| {
                 gateway_status_json
                     .as_ref()
-                    .and_then(|value| value.pointer("/gateway/port").and_then(|entry| entry.as_u64()))
+                    .and_then(|value| {
+                        value
+                            .pointer("/gateway/port")
+                            .and_then(|entry| entry.as_u64())
+                    })
                     .and_then(|port| u16::try_from(port).ok())
             });
 
@@ -553,9 +591,7 @@ async fn check_system() -> SystemInfo {
         };
 
         let openclaw_fully_installed =
-            openclaw_cli_ok
-            && openclaw_config_exists
-            && openclaw_home_exists;
+            openclaw_cli_ok && openclaw_config_exists && openclaw_home_exists;
 
         let node_ok = node_version
             .as_ref()
@@ -626,7 +662,10 @@ async fn check_system() -> SystemInfo {
 fn get_total_memory_gb() -> f64 {
     let result = run_cmd("sysctl", &["-n", "hw.memsize"]);
     if result.success {
-        result.stdout.trim().parse::<f64>()
+        result
+            .stdout
+            .trim()
+            .parse::<f64>()
             .map(|b| b / 1_073_741_824.0)
             .unwrap_or(0.0)
     } else {
@@ -640,7 +679,10 @@ fn get_total_memory_gb() -> f64 {
     if result.success {
         let parts: Vec<&str> = result.stdout.split_whitespace().collect();
         if parts.len() >= 2 {
-            parts[1].parse::<f64>().map(|kb| kb / 1_048_576.0).unwrap_or(0.0)
+            parts[1]
+                .parse::<f64>()
+                .map(|kb| kb / 1_048_576.0)
+                .unwrap_or(0.0)
         } else {
             0.0
         }
@@ -658,7 +700,9 @@ fn get_total_memory_gb() -> f64 {
     if result.success {
         for line in result.stdout.lines() {
             if let Some(val) = line.strip_prefix("TotalPhysicalMemory=") {
-                return val.trim().parse::<f64>()
+                return val
+                    .trim()
+                    .parse::<f64>()
                     .map(|b| b / 1_073_741_824.0)
                     .unwrap_or(0.0);
             }
@@ -674,7 +718,10 @@ fn get_total_memory_gb() -> f64 {
         ],
     );
     if fallback.success {
-        return fallback.stdout.trim().parse::<f64>()
+        return fallback
+            .stdout
+            .trim()
+            .parse::<f64>()
             .map(|b| b / 1_073_741_824.0)
             .unwrap_or(0.0);
     }
@@ -728,7 +775,9 @@ fn get_free_disk_gb() -> f64 {
     if result.success {
         for line in result.stdout.lines() {
             if let Some(val) = line.strip_prefix("FreeSpace=") {
-                return val.trim().parse::<f64>()
+                return val
+                    .trim()
+                    .parse::<f64>()
                     .map(|b| b / 1_073_741_824.0)
                     .unwrap_or(0.0);
             }
@@ -745,7 +794,10 @@ fn get_free_disk_gb() -> f64 {
         ],
     );
     if fallback.success {
-        return fallback.stdout.trim().parse::<f64>()
+        return fallback
+            .stdout
+            .trim()
+            .parse::<f64>()
             .map(|b| b / 1_073_741_824.0)
             .unwrap_or(0.0);
     }
@@ -768,14 +820,18 @@ fn strip_ansi(s: &str) -> String {
                     // consume until 0x40-0x7E
                     while let Some(&ch) = chars.peek() {
                         chars.next();
-                        if ('\x40'..='\x7e').contains(&ch) { break; }
+                        if ('\x40'..='\x7e').contains(&ch) {
+                            break;
+                        }
                     }
                     continue;
                 } else if next == ']' {
                     chars.next();
                     // OSC: consume until BEL (\x07) or ST (ESC \)
                     while let Some(ch) = chars.next() {
-                        if ch == '\x07' { break; }
+                        if ch == '\x07' {
+                            break;
+                        }
                         if ch == '\x1b' {
                             let _ = chars.next(); // consume '\'
                             break;
@@ -791,8 +847,12 @@ fn strip_ansi(s: &str) -> String {
             continue;
         }
         // Also filter carriage returns and other control chars (except newline/tab)
-        if c == '\r' { continue; }
-        if c.is_control() && c != '\n' && c != '\t' { continue; }
+        if c == '\r' {
+            continue;
+        }
+        if c.is_control() && c != '\n' && c != '\t' {
+            continue;
+        }
         out.push(c);
     }
     out
@@ -954,13 +1014,18 @@ fn stream_script(
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            let _ = app.emit("install-log", InstallEvent {
-                level: "error".into(),
-                message: format!("无法启动进程: {}", e),
-            });
+            let _ = app.emit(
+                "install-log",
+                InstallEvent {
+                    level: "error".into(),
+                    message: format!("无法启动进程: {}", e),
+                },
+            );
             return CommandResult {
-                success: false, stdout: String::new(),
-                stderr: e.to_string(), code: None,
+                success: false,
+                stdout: String::new(),
+                stderr: e.to_string(),
+                code: None,
             };
         }
     };
@@ -984,10 +1049,13 @@ fn stream_script(
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 let cleaned = clean_line(&line);
                 if !cleaned.is_empty() {
-                    let _ = app_out.emit("install-log", InstallEvent {
-                        level: "info".into(),
-                        message: cleaned.clone(),
-                    });
+                    let _ = app_out.emit(
+                        "install-log",
+                        InstallEvent {
+                            level: "info".into(),
+                            message: cleaned.clone(),
+                        },
+                    );
                     lines.push(cleaned);
                 }
             }
@@ -1002,10 +1070,13 @@ fn stream_script(
             for line in BufReader::new(err).lines().map_while(Result::ok) {
                 let cleaned = clean_line(&line);
                 if !cleaned.is_empty() {
-                    let _ = app_err.emit("install-log", InstallEvent {
-                        level: "error".into(),
-                        message: cleaned.clone(),
-                    });
+                    let _ = app_err.emit(
+                        "install-log",
+                        InstallEvent {
+                            level: "error".into(),
+                            message: cleaned.clone(),
+                        },
+                    );
                     lines.push(cleaned);
                 }
             }
@@ -1023,7 +1094,12 @@ fn stream_script(
     };
 
     // NOTE: does NOT emit "done" event — caller is responsible
-    CommandResult { success, stdout: stdout_text, stderr: stderr_text, code }
+    CommandResult {
+        success,
+        stdout: stdout_text,
+        stderr: stderr_text,
+        code,
+    }
 }
 
 fn stream_command_to_event(
@@ -1062,10 +1138,13 @@ fn stream_command_to_event(
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            let _ = app.emit(event_name, InstallEvent {
-                level: "error".into(),
-                message: format!("无法启动进程: {}", e),
-            });
+            let _ = app.emit(
+                event_name,
+                InstallEvent {
+                    level: "error".into(),
+                    message: format!("无法启动进程: {}", e),
+                },
+            );
             return CommandResult {
                 success: false,
                 stdout: String::new(),
@@ -1094,10 +1173,13 @@ fn stream_command_to_event(
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 let cleaned = clean_line(&line);
                 if !cleaned.is_empty() {
-                    let _ = app_out.emit(&event_name_out, InstallEvent {
-                        level: "info".into(),
-                        message: cleaned.clone(),
-                    });
+                    let _ = app_out.emit(
+                        &event_name_out,
+                        InstallEvent {
+                            level: "info".into(),
+                            message: cleaned.clone(),
+                        },
+                    );
                     lines.push(cleaned);
                 }
             }
@@ -1113,10 +1195,13 @@ fn stream_command_to_event(
             for line in BufReader::new(err).lines().map_while(Result::ok) {
                 let cleaned = clean_line(&line);
                 if !cleaned.is_empty() {
-                    let _ = app_err.emit(&event_name_err, InstallEvent {
-                        level: "error".into(),
-                        message: cleaned.clone(),
-                    });
+                    let _ = app_err.emit(
+                        &event_name_err,
+                        InstallEvent {
+                            level: "error".into(),
+                            message: cleaned.clone(),
+                        },
+                    );
                     lines.push(cleaned);
                 }
             }
@@ -1133,7 +1218,12 @@ fn stream_command_to_event(
         Err(_) => (false, None),
     };
 
-    CommandResult { success, stdout: stdout_text, stderr: stderr_text, code }
+    CommandResult {
+        success,
+        stdout: stdout_text,
+        stderr: stderr_text,
+        code,
+    }
 }
 
 fn stream_command(
@@ -1270,12 +1360,18 @@ fn verify_gateway_service_removal(home: &str) -> Vec<String> {
             }
         }
     } else if cfg!(target_os = "linux") {
-        let enabled = run_cmd("systemctl", &["--user", "is-enabled", "openclaw-gateway.service"]);
+        let enabled = run_cmd(
+            "systemctl",
+            &["--user", "is-enabled", "openclaw-gateway.service"],
+        );
         if enabled.success {
             leftovers.push("systemd 服务仍已启用".into());
         }
 
-        let active = run_cmd("systemctl", &["--user", "is-active", "openclaw-gateway.service"]);
+        let active = run_cmd(
+            "systemctl",
+            &["--user", "is-active", "openclaw-gateway.service"],
+        );
         if active.success && active.stdout.trim() == "active" {
             leftovers.push("systemd 服务仍在运行".into());
         }
@@ -1300,7 +1396,9 @@ fn gateway_status_indicates_ready(result: &CommandResult, port: u16) -> bool {
     let runtime_state = snapshot
         .pointer("/service/runtime/state")
         .and_then(|value| value.as_str());
-    let rpc_ok = snapshot.pointer("/rpc/ok").and_then(|value| value.as_bool());
+    let rpc_ok = snapshot
+        .pointer("/rpc/ok")
+        .and_then(|value| value.as_bool());
     let configured_port = snapshot
         .pointer("/gateway/port")
         .and_then(|value| value.as_u64())
@@ -1309,7 +1407,9 @@ fn gateway_status_indicates_ready(result: &CommandResult, port: u16) -> bool {
     let running = matches!(runtime_status, Some("running" | "active"))
         || matches!(runtime_state, Some("running" | "active"))
         || rpc_ok == Some(true);
-    let port_matches = configured_port.map(|configured| configured == port).unwrap_or(true);
+    let port_matches = configured_port
+        .map(|configured| configured == port)
+        .unwrap_or(true);
 
     running && port_matches && check_port(port)
 }
@@ -1328,7 +1428,8 @@ fn wait_for_gateway_ready(port: u16, attempts: usize, delay: Duration) -> (bool,
     };
 
     for attempt in 0..attempts {
-        let gateway_status = run_openclaw_args_timeout(&gateway_status_args, Duration::from_secs(8));
+        let gateway_status =
+            run_openclaw_args_timeout(&gateway_status_args, Duration::from_secs(8));
         let ready = gateway_status_indicates_ready(&gateway_status, port);
         last_gateway_status = gateway_status;
         if ready {
@@ -1356,7 +1457,8 @@ async fn run_uninstall_command(app: AppHandle, remove_data: bool) -> CommandResu
         let config_artifacts = collect_openclaw_config_artifacts();
         let mut failures = Vec::new();
         let format_paths = |paths: &[PathBuf]| -> String {
-            paths.iter()
+            paths
+                .iter()
                 .take(6)
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>()
@@ -1389,10 +1491,20 @@ async fn run_uninstall_command(app: AppHandle, remove_data: bool) -> CommandResu
                 Duration::from_secs(20),
             );
             if !uninstall_result.success {
-                emit_install_event(&app, event, "warn", "网关守护进程卸载返回非零退出码，继续执行文件清理");
+                emit_install_event(
+                    &app,
+                    event,
+                    "warn",
+                    "网关守护进程卸载返回非零退出码，继续执行文件清理",
+                );
             }
         } else {
-            emit_install_event(&app, event, "warn", "未检测到 openclaw CLI，跳过 gateway stop/uninstall 命令");
+            emit_install_event(
+                &app,
+                event,
+                "warn",
+                "未检测到 openclaw CLI，跳过 gateway stop/uninstall 命令",
+            );
         }
 
         // Step 3: Platform-specific service cleanup
@@ -1409,7 +1521,12 @@ async fn run_uninstall_command(app: AppHandle, remove_data: bool) -> CommandResu
                     Duration::from_secs(10),
                 );
                 if !bootout_result.success {
-                    emit_install_event(&app, event, "warn", "launchd bootout 未返回成功，继续移除 plist 文件");
+                    emit_install_event(
+                        &app,
+                        event,
+                        "warn",
+                        "launchd bootout 未返回成功，继续移除 plist 文件",
+                    );
                 }
             }
         } else if cfg!(target_os = "linux") {
@@ -1423,7 +1540,12 @@ async fn run_uninstall_command(app: AppHandle, remove_data: bool) -> CommandResu
                     Duration::from_secs(15),
                 );
                 if !disable_result.success {
-                    emit_install_event(&app, event, "warn", "systemd disable/stop 未返回成功，继续移除服务文件");
+                    emit_install_event(
+                        &app,
+                        event,
+                        "warn",
+                        "systemd disable/stop 未返回成功，继续移除服务文件",
+                    );
                 }
                 let reload_result = run_logged_command(
                     &app,
@@ -1440,7 +1562,12 @@ async fn run_uninstall_command(app: AppHandle, remove_data: bool) -> CommandResu
 
         for artifact in collect_openclaw_service_artifacts(&home) {
             if artifact.exists() {
-                emit_install_event(&app, event, "info", format!("删除服务文件: {}", artifact.display()));
+                emit_install_event(
+                    &app,
+                    event,
+                    "info",
+                    format!("删除服务文件: {}", artifact.display()),
+                );
                 if let Err(err) = remove_path_if_exists(&artifact) {
                     let message = format!("无法删除服务文件 {}: {}", artifact.display(), err);
                     emit_install_event(&app, event, "error", &message);
@@ -1450,7 +1577,12 @@ async fn run_uninstall_command(app: AppHandle, remove_data: bool) -> CommandResu
         }
 
         // Step 4: Remove CLI via known package managers
-        emit_install_event(&app, event, "info", "移除 OpenClaw CLI (npm/pnpm/bun/yarn)...");
+        emit_install_event(
+            &app,
+            event,
+            "info",
+            "移除 OpenClaw CLI (npm/pnpm/bun/yarn)...",
+        );
         let uninstallers: [(&str, &[&str]); 4] = [
             ("npm", &["rm", "-g", "openclaw"]),
             ("pnpm", &["remove", "-g", "openclaw"]),
@@ -1460,8 +1592,14 @@ async fn run_uninstall_command(app: AppHandle, remove_data: bool) -> CommandResu
 
         for (program, args) in uninstallers {
             if command_exists(program) {
-                emit_install_event(&app, event, "info", format!("尝试通过 {} 卸载 openclaw...", program));
-                let result = run_logged_command(&app, event, program, args, Duration::from_secs(30));
+                emit_install_event(
+                    &app,
+                    event,
+                    "info",
+                    format!("尝试通过 {} 卸载 openclaw...", program),
+                );
+                let result =
+                    run_logged_command(&app, event, program, args, Duration::from_secs(30));
                 if !result.success {
                     emit_install_event(
                         &app,
@@ -1517,21 +1655,32 @@ async fn run_uninstall_command(app: AppHandle, remove_data: bool) -> CommandResu
                     .collect();
                 if !matching_lines.is_empty() {
                     found_rc_refs = true;
-                    let _ = app.emit(event, InstallEvent {
-                        level: "warn".into(),
-                        message: format!("⚠ {} 中发现 openclaw 相关配置:", rc),
-                    });
-                    for (lineno, line) in &matching_lines {
-                        let _ = app.emit(event, InstallEvent {
+                    let _ = app.emit(
+                        event,
+                        InstallEvent {
                             level: "warn".into(),
-                            message: format!("  第 {} 行: {}", lineno + 1, line.trim()),
-                        });
+                            message: format!("⚠ {} 中发现 openclaw 相关配置:", rc),
+                        },
+                    );
+                    for (lineno, line) in &matching_lines {
+                        let _ = app.emit(
+                            event,
+                            InstallEvent {
+                                level: "warn".into(),
+                                message: format!("  第 {} 行: {}", lineno + 1, line.trim()),
+                            },
+                        );
                     }
                 }
             }
         }
         if found_rc_refs {
-            emit_install_event(&app, event, "warn", "建议手动编辑上述文件，删除 openclaw 相关行");
+            emit_install_event(
+                &app,
+                event,
+                "warn",
+                "建议手动编辑上述文件，删除 openclaw 相关行",
+            );
         }
 
         // Step 6: Remove data directory if requested
@@ -1672,8 +1821,10 @@ async fn run_uninstall_command(app: AppHandle, remove_data: bool) -> CommandResu
     })
     .await
     .unwrap_or_else(|e| CommandResult {
-        success: false, stdout: String::new(),
-        stderr: format!("Task panic: {}", e), code: None,
+        success: false,
+        stdout: String::new(),
+        stderr: format!("Task panic: {}", e),
+        code: None,
     })
 }
 
@@ -2260,16 +2411,25 @@ async fn run_onboard(app: AppHandle) -> CommandResult {
             .unwrap_or(18789);
         let args = build_onboard_args(None, None, None, None, port);
         let result = run_openclaw_args(&args);
-        let _ = app.emit("install-log", InstallEvent {
-            level: "done".into(),
-            message: if result.success { "success".into() } else { "fail".into() },
-        });
+        let _ = app.emit(
+            "install-log",
+            InstallEvent {
+                level: "done".into(),
+                message: if result.success {
+                    "success".into()
+                } else {
+                    "fail".into()
+                },
+            },
+        );
         result
     })
     .await
     .unwrap_or_else(|e| CommandResult {
-        success: false, stdout: String::new(),
-        stderr: format!("Task panic: {}", e), code: None,
+        success: false,
+        stdout: String::new(),
+        stderr: format!("Task panic: {}", e),
+        code: None,
     })
 }
 
@@ -2337,7 +2497,8 @@ async fn run_update_command(app: AppHandle) -> CommandResult {
         let event = "update-log";
         emit_install_event(&app, event, "info", "开始检查 OpenClaw 更新状态...");
 
-        let version_before = run_openclaw_args_timeout(&["--version".to_string()], Duration::from_secs(5));
+        let version_before =
+            run_openclaw_args_timeout(&["--version".to_string()], Duration::from_secs(5));
         if version_before.success && !version_before.stdout.is_empty() {
             emit_install_event(
                 &app,
@@ -2354,8 +2515,13 @@ async fn run_update_command(app: AppHandle) -> CommandResult {
         ];
         let status_result = run_openclaw_args_timeout(&status_args, Duration::from_secs(15));
         if status_result.success {
-            if let Ok(status_json) = serde_json::from_str::<serde_json::Value>(&status_result.stdout) {
-                if let Some(label) = status_json.pointer("/channel/label").and_then(|value| value.as_str()) {
+            if let Ok(status_json) =
+                serde_json::from_str::<serde_json::Value>(&status_result.stdout)
+            {
+                if let Some(label) = status_json
+                    .pointer("/channel/label")
+                    .and_then(|value| value.as_str())
+                {
                     emit_install_event(&app, event, "info", format!("更新渠道: {}", label));
                 }
 
@@ -2437,7 +2603,8 @@ async fn run_update_command(app: AppHandle) -> CommandResult {
         let update_result = stream_command_to_event(&app, event, &program, &update_args, &[], None);
 
         refresh_path();
-        let version_after = run_openclaw_args_timeout(&["--version".to_string()], Duration::from_secs(8));
+        let version_after =
+            run_openclaw_args_timeout(&["--version".to_string()], Duration::from_secs(8));
         if version_after.success && !version_after.stdout.is_empty() {
             emit_install_event(
                 &app,
@@ -2467,8 +2634,16 @@ async fn run_update_command(app: AppHandle) -> CommandResult {
             .collect::<Vec<_>>()
             .join("\n"),
             stderr: [
-                if status_result.success { String::new() } else { status_result.stderr },
-                if update_result.success { String::new() } else { update_result.stderr },
+                if status_result.success {
+                    String::new()
+                } else {
+                    status_result.stderr
+                },
+                if update_result.success {
+                    String::new()
+                } else {
+                    update_result.stderr
+                },
                 if version_after.success {
                     String::new()
                 } else if version_after.stderr.is_empty() {
@@ -2527,7 +2702,10 @@ async fn start_gateway(port: Option<u16>) -> CommandResult {
                 success: false,
                 stdout: start_result.stdout,
                 stderr: if last_status.stderr.is_empty() {
-                    format!("网关启动后端口 {} 仍未就绪，请检查 `openclaw gateway status`", port)
+                    format!(
+                        "网关启动后端口 {} 仍未就绪，请检查 `openclaw gateway status`",
+                        port
+                    )
                 } else {
                     format!("网关启动后未就绪: {}", last_status.stderr)
                 },
@@ -2649,9 +2827,8 @@ fn run_shell_command(program: String, args: Vec<String>) -> CommandResult {
 
 fn get_openclaw_home() -> String {
     let home = get_user_home_dir();
-    std::env::var("OPENCLAW_HOME").unwrap_or_else(|_| {
-        home.join(".openclaw").to_string_lossy().to_string()
-    })
+    std::env::var("OPENCLAW_HOME")
+        .unwrap_or_else(|_| home.join(".openclaw").to_string_lossy().to_string())
 }
 
 fn run_openclaw_args_timeout(args: &[String], timeout: Duration) -> CommandResult {
@@ -2674,7 +2851,11 @@ fn default_openclaw_config_path() -> PathBuf {
 
 fn get_openclaw_config_path() -> Option<PathBuf> {
     let path = default_openclaw_config_path();
-    if path.is_file() { Some(path) } else { None }
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 fn read_openclaw_config() -> Option<serde_json::Value> {
@@ -2684,12 +2865,10 @@ fn read_openclaw_config() -> Option<serde_json::Value> {
 }
 
 fn write_openclaw_config(config: &serde_json::Value) -> Result<(), String> {
-    let path = get_openclaw_config_path()
-        .unwrap_or_else(default_openclaw_config_path);
+    let path = get_openclaw_config_path().unwrap_or_else(default_openclaw_config_path);
     let bak = path.with_extension("json.bak");
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建配置目录失败: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
     }
     if path.exists() {
         std::fs::copy(&path, &bak).map_err(|e| format!("备份失败: {}", e))?;
@@ -2944,9 +3123,11 @@ fn read_agent_synced_models(agent_dir: &str) -> Vec<String> {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(providers) = json.get("providers").and_then(|value| value.as_object()) {
                 for provider in providers.values() {
-                    if let Some(models) = provider.get("models").and_then(|value| value.as_array()) {
+                    if let Some(models) = provider.get("models").and_then(|value| value.as_array())
+                    {
                         for model in models {
-                            if let Some(model_id) = model.get("id").and_then(|value| value.as_str()) {
+                            if let Some(model_id) = model.get("id").and_then(|value| value.as_str())
+                            {
                                 model_names.push(model_id.to_string());
                             }
                         }
@@ -2982,7 +3163,12 @@ fn default_agents_workspace(config: Option<&serde_json::Value>) -> String {
         .and_then(|value| value.pointer("/agents/defaults/workspace"))
         .and_then(|value| value.as_str())
         .map(|value| value.to_string())
-        .unwrap_or_else(|| PathBuf::from(get_openclaw_home()).join("workspace").to_string_lossy().to_string())
+        .unwrap_or_else(|| {
+            PathBuf::from(get_openclaw_home())
+                .join("workspace")
+                .to_string_lossy()
+                .to_string()
+        })
 }
 
 fn default_agents_model(config: Option<&serde_json::Value>) -> String {
@@ -2993,7 +3179,10 @@ fn default_agents_model(config: Option<&serde_json::Value>) -> String {
         .to_string()
 }
 
-fn find_config_agent_item<'a>(config: &'a serde_json::Value, agent_id: &str) -> Option<&'a serde_json::Value> {
+fn find_config_agent_item<'a>(
+    config: &'a serde_json::Value,
+    agent_id: &str,
+) -> Option<&'a serde_json::Value> {
     config
         .pointer("/agents/list")
         .and_then(|value| value.as_array())
@@ -3010,7 +3199,11 @@ fn agent_info_from_config_item(
     default_workspace: &str,
 ) -> Option<AgentInfo> {
     let id = item.get("id").and_then(|value| value.as_str())?.to_string();
-    let name = item.get("name").and_then(|value| value.as_str()).unwrap_or(&id).to_string();
+    let name = item
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&id)
+        .to_string();
     let workspace = item
         .get("workspace")
         .and_then(|value| value.as_str())
@@ -3069,17 +3262,23 @@ fn verify_created_agent(
         }
 
         if let Ok(cli_agents) = list_agents_from_cli(config.as_ref()) {
-            if let Some(agent) = cli_agents.into_iter().find(|candidate| candidate.id == agent_id) {
+            if let Some(agent) = cli_agents
+                .into_iter()
+                .find(|candidate| candidate.id == agent_id)
+            {
                 let config_has_entry = config
                     .as_ref()
                     .and_then(|value| find_config_agent_item(value, agent_id))
                     .is_some();
 
                 if !config_has_entry {
-                    let _ = ensure_agent_config_entry(agent_id, workspace, agent_dir, model, bindings);
+                    let _ =
+                        ensure_agent_config_entry(agent_id, workspace, agent_dir, model, bindings);
 
                     if let Some(config_after_sync) = read_openclaw_config() {
-                        if let Some(config_agent) = created_agent_from_config(&config_after_sync, agent_id) {
+                        if let Some(config_agent) =
+                            created_agent_from_config(&config_after_sync, agent_id)
+                        {
                             return Ok(config_agent);
                         }
                     }
@@ -3099,7 +3298,10 @@ fn verify_created_agent(
 fn list_agents_from_config_value(config: &serde_json::Value) -> Vec<AgentInfo> {
     let default_model = default_agents_model(Some(config));
     let default_workspace = default_agents_workspace(Some(config));
-    let Some(agent_list) = config.pointer("/agents/list").and_then(|value| value.as_array()) else {
+    let Some(agent_list) = config
+        .pointer("/agents/list")
+        .and_then(|value| value.as_array())
+    else {
         return vec![];
     };
 
@@ -3139,7 +3341,10 @@ fn ensure_agent_config_entry(
 
     let workspace_str = workspace.to_string_lossy().to_string();
     let agent_dir_str = agent_dir.to_string_lossy().to_string();
-    let model_value = model.map(str::trim).filter(|value| !value.is_empty()).map(|value| value.to_string());
+    let model_value = model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
     let binding_values = bindings
         .iter()
         .map(|binding| binding.trim().to_string())
@@ -3153,8 +3358,14 @@ fn ensure_agent_config_entry(
         let object = existing
             .as_object_mut()
             .ok_or_else(|| format!("Agent '{}' 配置格式异常", agent_id))?;
-        object.insert("workspace".to_string(), serde_json::Value::String(workspace_str));
-        object.insert("agentDir".to_string(), serde_json::Value::String(agent_dir_str));
+        object.insert(
+            "workspace".to_string(),
+            serde_json::Value::String(workspace_str),
+        );
+        object.insert(
+            "agentDir".to_string(),
+            serde_json::Value::String(agent_dir_str),
+        );
 
         if let Some(model_value) = model_value {
             object.insert("model".to_string(), serde_json::Value::String(model_value));
@@ -3165,9 +3376,18 @@ fn ensure_agent_config_entry(
         }
     } else {
         let mut entry = serde_json::Map::new();
-        entry.insert("id".to_string(), serde_json::Value::String(agent_id.to_string()));
-        entry.insert("workspace".to_string(), serde_json::Value::String(workspace_str));
-        entry.insert("agentDir".to_string(), serde_json::Value::String(agent_dir_str));
+        entry.insert(
+            "id".to_string(),
+            serde_json::Value::String(agent_id.to_string()),
+        );
+        entry.insert(
+            "workspace".to_string(),
+            serde_json::Value::String(workspace_str),
+        );
+        entry.insert(
+            "agentDir".to_string(),
+            serde_json::Value::String(agent_dir_str),
+        );
 
         if let Some(model_value) = model_value {
             entry.insert("model".to_string(), serde_json::Value::String(model_value));
@@ -3191,7 +3411,11 @@ fn ensure_agent_config_entry(
 }
 
 fn list_agents_from_cli(config: Option<&serde_json::Value>) -> Result<Vec<AgentInfo>, String> {
-    let args = vec!["agents".to_string(), "list".to_string(), "--json".to_string()];
+    let args = vec![
+        "agents".to_string(),
+        "list".to_string(),
+        "--json".to_string(),
+    ];
     let result = run_openclaw_args_timeout(&args, Duration::from_secs(10));
     if !result.success {
         return Err(if result.stderr.is_empty() {
@@ -3212,7 +3436,11 @@ fn list_agents_from_cli(config: Option<&serde_json::Value>) -> Result<Vec<AgentI
     let mut seen_ids = BTreeSet::new();
 
     for item in cli_agents {
-        let Some(id) = item.get("id").and_then(|value| value.as_str()).map(|value| value.to_string()) else {
+        let Some(id) = item
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string())
+        else {
             continue;
         };
 
@@ -3220,13 +3448,18 @@ fn list_agents_from_cli(config: Option<&serde_json::Value>) -> Result<Vec<AgentI
         let workspace = item
             .get("workspace")
             .and_then(|value| value.as_str())
-            .or_else(|| config_item.and_then(|entry| entry.get("workspace").and_then(|value| value.as_str())))
+            .or_else(|| {
+                config_item
+                    .and_then(|entry| entry.get("workspace").and_then(|value| value.as_str()))
+            })
             .unwrap_or(&default_workspace)
             .to_string();
         let agent_dir = item
             .get("agentDir")
             .and_then(|value| value.as_str())
-            .or_else(|| config_item.and_then(|entry| entry.get("agentDir").and_then(|value| value.as_str())))
+            .or_else(|| {
+                config_item.and_then(|entry| entry.get("agentDir").and_then(|value| value.as_str()))
+            })
             .map(|value| value.to_string())
             .unwrap_or_else(|| default_agent_dir(&id).to_string_lossy().to_string());
         let bindings = config_item
@@ -3289,18 +3522,15 @@ fn collect_agents() -> Vec<AgentInfo> {
 }
 
 fn resolve_agent_workspace_path(agent_id: &str) -> Result<PathBuf, String> {
-    let config = read_openclaw_config()
-        .ok_or_else(|| "当前未检测到 OpenClaw 配置".to_string())?;
+    let config = read_openclaw_config().ok_or_else(|| "当前未检测到 OpenClaw 配置".to_string())?;
     let default_workspace = PathBuf::from(default_agents_workspace(Some(&config)));
 
     if let Some(agent_item) = find_config_agent_item(&config, agent_id) {
-        return Ok(
-            agent_item
-                .get("workspace")
-                .and_then(|value| value.as_str())
-                .map(PathBuf::from)
-                .unwrap_or(default_workspace),
-        );
+        return Ok(agent_item
+            .get("workspace")
+            .and_then(|value| value.as_str())
+            .map(PathBuf::from)
+            .unwrap_or(default_workspace));
     }
 
     if let Ok(cli_agents) = list_agents_from_cli(Some(&config)) {
@@ -3312,7 +3542,10 @@ fn resolve_agent_workspace_path(agent_id: &str) -> Result<PathBuf, String> {
     Err(format!("Agent '{}' not found", agent_id))
 }
 
-fn resolve_workspace_dir_for_agent(agent_id: &str, workspace_dir: Option<String>) -> Result<PathBuf, String> {
+fn resolve_workspace_dir_for_agent(
+    agent_id: &str,
+    workspace_dir: Option<String>,
+) -> Result<PathBuf, String> {
     let hinted_path = workspace_dir
         .as_deref()
         .map(str::trim)
@@ -3346,7 +3579,9 @@ fn list_skills() -> Vec<SkillInfo> {
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
             let entry_path = entry.path();
-            if !entry_path.is_dir() { continue; }
+            if !entry_path.is_dir() {
+                continue;
+            }
 
             let name = entry.file_name().to_string_lossy().to_string();
             let mut version = String::from("unknown");
@@ -3376,9 +3611,19 @@ fn list_skills() -> Vec<SkillInfo> {
                         for line in content.lines() {
                             let trimmed = line.trim();
                             if trimmed.starts_with("version:") {
-                                version = trimmed.trim_start_matches("version:").trim().trim_matches('"').trim_matches('\'').to_string();
+                                version = trimmed
+                                    .trim_start_matches("version:")
+                                    .trim()
+                                    .trim_matches('"')
+                                    .trim_matches('\'')
+                                    .to_string();
                             } else if trimmed.starts_with("description:") {
-                                description = trimmed.trim_start_matches("description:").trim().trim_matches('"').trim_matches('\'').to_string();
+                                description = trimmed
+                                    .trim_start_matches("description:")
+                                    .trim()
+                                    .trim_matches('"')
+                                    .trim_matches('\'')
+                                    .to_string();
                             } else if trimmed.starts_with("enabled:") {
                                 let val = trimmed.trim_start_matches("enabled:").trim();
                                 enabled = val != "false";
@@ -3409,18 +3654,24 @@ fn delete_skill(name: String) -> CommandResult {
     let path = std::path::Path::new(&skill_path);
     if !path.exists() {
         return CommandResult {
-            success: false, stdout: String::new(),
-            stderr: format!("Skill '{}' not found", name), code: Some(1),
+            success: false,
+            stdout: String::new(),
+            stderr: format!("Skill '{}' not found", name),
+            code: Some(1),
         };
     }
     match std::fs::remove_dir_all(path) {
         Ok(_) => CommandResult {
-            success: true, stdout: format!("已删除 {}", name),
-            stderr: String::new(), code: Some(0),
+            success: true,
+            stdout: format!("已删除 {}", name),
+            stderr: String::new(),
+            code: Some(0),
         },
         Err(e) => CommandResult {
-            success: false, stdout: String::new(),
-            stderr: format!("删除失败: {}", e), code: Some(1),
+            success: false,
+            stdout: String::new(),
+            stderr: format!("删除失败: {}", e),
+            code: Some(1),
         },
     }
 }
@@ -3465,12 +3716,14 @@ async fn create_agent(
 
         let config = match read_openclaw_config() {
             Some(c) => c,
-            None => return CommandResult {
-                success: false,
-                stdout: String::new(),
-                stderr: "当前未检测到 OpenClaw 配置，请先完成安装与基础配置".into(),
-                code: Some(1),
-            },
+            None => {
+                return CommandResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "当前未检测到 OpenClaw 配置，请先完成安装与基础配置".into(),
+                    code: Some(1),
+                }
+            }
         };
 
         let agent_workspace = workspace
@@ -3495,12 +3748,18 @@ async fn create_agent(
             };
         }
 
-        if let Some(agent_list) = config.pointer("/agents/list").and_then(|value| value.as_array()) {
+        if let Some(agent_list) = config
+            .pointer("/agents/list")
+            .and_then(|value| value.as_array())
+        {
             let workspace_key = normalize_path_key(&agent_workspace);
             let agent_dir_key = normalize_path_key(&agent_dir_path);
 
             for item in agent_list {
-                let existing_id = item.get("id").and_then(|value| value.as_str()).unwrap_or("");
+                let existing_id = item
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
                 if normalize_agent_id_key(existing_id) == agent_id {
                     return CommandResult {
                         success: false,
@@ -3552,7 +3811,11 @@ async fn create_agent(
             return CommandResult {
                 success: false,
                 stdout: String::new(),
-                stderr: format!("无法创建 Agent 工作区 {}: {}", agent_workspace.display(), err),
+                stderr: format!(
+                    "无法创建 Agent 工作区 {}: {}",
+                    agent_workspace.display(),
+                    err
+                ),
                 code: Some(1),
             };
         }
@@ -3587,7 +3850,11 @@ async fn create_agent(
             "--json".to_string(),
         ];
 
-        if let Some(model_id) = model.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some(model_id) = model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             args.push("--model".to_string());
             args.push(model_id.to_string());
         }
@@ -3623,7 +3890,13 @@ async fn create_agent(
             .as_ref()
             .and_then(|value| value.get("model").and_then(|entry| entry.as_str()))
             .map(|value| value.to_string())
-            .or_else(|| model.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(|value| value.to_string()));
+            .or_else(|| {
+                model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.to_string())
+            });
 
         let seeded_files = match seed_agent_workspace(&created_workspace, &created_agent_id) {
             Ok(files) => files,
@@ -3794,22 +4067,26 @@ fn save_agent_workspace_file(
 ) -> CommandResult {
     let allowed_file_name = match ensure_allowed_agent_workspace_file(file_name.trim()) {
         Ok(name) => name,
-        Err(error) => return CommandResult {
-            success: false,
-            stdout: String::new(),
-            stderr: error,
-            code: Some(1),
-        },
+        Err(error) => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            }
+        }
     };
 
     let workspace_dir = match resolve_workspace_dir_for_agent(&id, workspace_dir) {
         Ok(path) => path,
-        Err(error) => return CommandResult {
-            success: false,
-            stdout: String::new(),
-            stderr: error,
-            code: Some(1),
-        },
+        Err(error) => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            }
+        }
     };
 
     if let Err(error) = std::fs::create_dir_all(&workspace_dir) {
@@ -3854,9 +4131,17 @@ fn delete_agent(id: String) -> CommandResult {
 
     let mut removed_from_config = false;
     if let Some(mut config) = read_openclaw_config() {
-        if let Some(agent_list) = config.pointer_mut("/agents/list").and_then(|value| value.as_array_mut()) {
-            if let Some(index) = agent_list.iter().position(|item| item.get("id").and_then(|value| value.as_str()) == Some(id.as_str())) {
-                if let Some(path) = agent_list[index].get("agentDir").and_then(|value| value.as_str()) {
+        if let Some(agent_list) = config
+            .pointer_mut("/agents/list")
+            .and_then(|value| value.as_array_mut())
+        {
+            if let Some(index) = agent_list.iter().position(|item| {
+                item.get("id").and_then(|value| value.as_str()) == Some(id.as_str())
+            }) {
+                if let Some(path) = agent_list[index]
+                    .get("agentDir")
+                    .and_then(|value| value.as_str())
+                {
                     agent_dir = path.to_string();
                     agent_root = agent_root_from_agent_dir(&id, &agent_dir);
                 }
@@ -3946,36 +4231,71 @@ fn list_providers() -> Vec<ProviderInfo> {
         None => return vec![],
     };
 
-    let providers = match config.pointer("/models/providers").and_then(|v| v.as_object()) {
+    let providers = match config
+        .pointer("/models/providers")
+        .and_then(|v| v.as_object())
+    {
         Some(p) => p,
         None => return vec![],
     };
 
     let mut result = Vec::new();
     for (name, provider) in providers {
-        let base_url = provider.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let api_key = provider.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let base_url = provider
+            .get("baseUrl")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let api_key = provider
+            .get("apiKey")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let mut models = Vec::new();
 
         if let Some(arr) = provider.get("models").and_then(|v| v.as_array()) {
             for m in arr {
-                let input: Vec<String> = m.get("input")
+                let input: Vec<String> = m
+                    .get("input")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_else(|| vec!["text".to_string()]);
 
                 models.push(ModelEntry {
-                    id: m.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    name: m.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    reasoning: m.get("reasoning").and_then(|v| v.as_bool()).unwrap_or(false),
+                    id: m
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    name: m
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    reasoning: m
+                        .get("reasoning")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                     input,
-                    context_window: m.get("contextWindow").and_then(|v| v.as_u64()).unwrap_or(200000),
+                    context_window: m
+                        .get("contextWindow")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(200000),
                     max_tokens: m.get("maxTokens").and_then(|v| v.as_u64()).unwrap_or(8192),
                 });
             }
         }
 
-        result.push(ProviderInfo { name: name.clone(), base_url, api_key, models });
+        result.push(ProviderInfo {
+            name: name.clone(),
+            base_url,
+            api_key,
+            models,
+        });
     }
 
     result.sort_by(|a, b| a.name.cmp(&b.name));
@@ -3985,7 +4305,11 @@ fn list_providers() -> Vec<ProviderInfo> {
 #[tauri::command]
 fn get_primary_model() -> String {
     read_openclaw_config()
-        .and_then(|c| c.pointer("/agents/defaults/model/primary").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .and_then(|c| {
+            c.pointer("/agents/defaults/model/primary")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .unwrap_or_default()
 }
 
@@ -4016,13 +4340,17 @@ fn fetch_remote_models(base_url: String, api_key: String) -> CommandResult {
 
     let raw = result.stdout.trim().to_string();
     let (body, http_code) = match raw.rfind('\n') {
-        Some(pos) => (raw[..pos].trim().to_string(), raw[pos+1..].trim().to_string()),
+        Some(pos) => (
+            raw[..pos].trim().to_string(),
+            raw[pos + 1..].trim().to_string(),
+        ),
         None => (raw.clone(), String::new()),
     };
 
     if !http_code.is_empty() && !http_code.starts_with('2') {
         return CommandResult {
-            success: false, stdout: String::new(),
+            success: false,
+            stdout: String::new(),
             stderr: format!("API 请求失败 (HTTP {})，请检查地址和 Key", http_code),
             code: Some(1),
         };
@@ -4031,7 +4359,8 @@ fn fetch_remote_models(base_url: String, api_key: String) -> CommandResult {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
         let preview: String = body.chars().take(300).collect();
         return CommandResult {
-            success: false, stdout: String::new(),
+            success: false,
+            stdout: String::new(),
             stderr: format!("API 返回的不是有效 JSON。响应内容:\n{}", preview),
             code: Some(1),
         };
@@ -4052,7 +4381,9 @@ fn fetch_remote_models(base_url: String, api_key: String) -> CommandResult {
     // { "data": [...] }  — OpenAI compatible
     // { "models": [...] } — Ollama and others
     // [...] — direct array
-    let models_arr = json.get("data").and_then(|v| v.as_array())
+    let models_arr = json
+        .get("data")
+        .and_then(|v| v.as_array())
         .or_else(|| json.get("models").and_then(|v| v.as_array()))
         .or_else(|| json.as_array());
 
@@ -4060,18 +4391,29 @@ fn fetch_remote_models(base_url: String, api_key: String) -> CommandResult {
         let mut ids = extract_ids(arr);
         if ids.is_empty() {
             return CommandResult {
-                success: false, stdout: String::new(),
-                stderr: "API 返回的模型列表为空".to_string(), code: Some(1),
+                success: false,
+                stdout: String::new(),
+                stderr: "API 返回的模型列表为空".to_string(),
+                code: Some(1),
             };
         }
         ids.sort();
         let ids_json = serde_json::to_string(&ids).unwrap_or_default();
-        return CommandResult { success: true, stdout: ids_json, stderr: String::new(), code: Some(0) };
+        return CommandResult {
+            success: true,
+            stdout: ids_json,
+            stderr: String::new(),
+            code: Some(0),
+        };
     }
 
     CommandResult {
-        success: false, stdout: String::new(),
-        stderr: format!("API 返回格式异常，无法识别模型列表。响应内容: {}", &result.stdout[..result.stdout.len().min(200)]),
+        success: false,
+        stdout: String::new(),
+        stderr: format!(
+            "API 返回格式异常，无法识别模型列表。响应内容: {}",
+            &result.stdout[..result.stdout.len().min(200)]
+        ),
         code: Some(1),
     }
 }
@@ -4086,50 +4428,84 @@ fn detect_model_caps(model_id: &str) -> (Vec<String>, bool, u64, u64) {
 
     // Qwen
     if mid.starts_with("qwen3.5-plus") {
-        input = vec!["text".into(), "image".into()]; ctx = 1000000; max = 65536;
+        input = vec!["text".into(), "image".into()];
+        ctx = 1000000;
+        max = 65536;
     } else if mid.starts_with("qwen3-coder") || mid.starts_with("qwen3-max") {
-        ctx = 262144; max = 65536;
+        ctx = 262144;
+        max = 65536;
     } else if mid.contains("qwen") && mid.contains("vl") {
-        input = vec!["text".into(), "image".into()]; ctx = 131072; max = 8192;
+        input = vec!["text".into(), "image".into()];
+        ctx = 131072;
+        max = 8192;
     } else if mid.starts_with("qwen") {
-        input = vec!["text".into(), "image".into()]; ctx = 131072; max = 16384;
+        input = vec!["text".into(), "image".into()];
+        ctx = 131072;
+        max = 16384;
     } else if mid.starts_with("qwq") {
-        reasoning = true; ctx = 131072; max = 16384;
+        reasoning = true;
+        ctx = 131072;
+        max = 16384;
     // GLM
     } else if mid.starts_with("glm-5") || mid.starts_with("glm-4.7") {
-        ctx = 202752; max = 16384;
+        ctx = 202752;
+        max = 16384;
     } else if mid.starts_with("glm-4v") {
-        input = vec!["text".into(), "image".into()]; ctx = 8192; max = 4096;
+        input = vec!["text".into(), "image".into()];
+        ctx = 8192;
+        max = 4096;
     // Kimi
     } else if mid.starts_with("kimi-k") {
-        input = vec!["text".into(), "image".into()]; ctx = 262144; max = 32768;
+        input = vec!["text".into(), "image".into()];
+        ctx = 262144;
+        max = 32768;
     // Claude
     } else if mid.contains("claude") && (mid.contains("opus") || mid.contains("sonnet")) {
-        input = vec!["text".into(), "image".into()]; ctx = 200000; max = 16384;
+        input = vec!["text".into(), "image".into()];
+        ctx = 200000;
+        max = 16384;
     } else if mid.contains("claude") && mid.contains("haiku") {
-        input = vec!["text".into(), "image".into()]; ctx = 200000; max = 8192;
+        input = vec!["text".into(), "image".into()];
+        ctx = 200000;
+        max = 8192;
     // GPT
     } else if mid.contains("gpt-4.1") || mid.contains("gpt-4.5") {
-        input = vec!["text".into(), "image".into()]; ctx = 1047576; max = 32768;
+        input = vec!["text".into(), "image".into()];
+        ctx = 1047576;
+        max = 32768;
     } else if mid.contains("gpt-4o") || mid.contains("gpt-4-turbo") {
-        input = vec!["text".into(), "image".into()]; ctx = 128000; max = 16384;
+        input = vec!["text".into(), "image".into()];
+        ctx = 128000;
+        max = 16384;
     } else if mid.contains("gpt-5") {
-        ctx = 200000; max = 8192;
+        ctx = 200000;
+        max = 8192;
     } else if mid.starts_with("o1") || mid.starts_with("o3") || mid.starts_with("o4") {
-        input = vec!["text".into(), "image".into()]; reasoning = true; ctx = 200000; max = 100000;
+        input = vec!["text".into(), "image".into()];
+        reasoning = true;
+        ctx = 200000;
+        max = 100000;
     // Gemini
     } else if mid.contains("gemini") {
-        input = vec!["text".into(), "image".into()]; ctx = 1048576; max = 65536;
+        input = vec!["text".into(), "image".into()];
+        ctx = 1048576;
+        max = 65536;
     // DeepSeek
     } else if mid.contains("deepseek") && (mid.contains("r1") || mid.contains("r2")) {
-        reasoning = true; ctx = 65536; max = 16384;
+        reasoning = true;
+        ctx = 65536;
+        max = 16384;
     } else if mid.contains("deepseek") {
-        input = vec!["text".into(), "image".into()]; ctx = 65536; max = 16384;
+        input = vec!["text".into(), "image".into()];
+        ctx = 65536;
+        max = 16384;
     // MiniMax
     } else if mid.contains("minimax") && mid.contains("m2") {
-        ctx = 204800; max = 131072;
+        ctx = 204800;
+        max = 131072;
     } else if mid.contains("minimax") {
-        ctx = 204800; max = 16384;
+        ctx = 204800;
+        max = 16384;
     }
 
     // Override: thinking/reasoning keywords
@@ -4182,7 +4558,10 @@ fn dedupe_model_ids(model_ids: Vec<String>) -> Vec<String> {
 fn collect_model_refs(config: &serde_json::Value) -> Vec<String> {
     let mut refs = BTreeSet::new();
 
-    if let Some(providers) = config.pointer("/models/providers").and_then(|v| v.as_object()) {
+    if let Some(providers) = config
+        .pointer("/models/providers")
+        .and_then(|v| v.as_object())
+    {
         for (provider_name, provider) in providers {
             if let Some(models) = provider.get("models").and_then(|v| v.as_array()) {
                 for model in models {
@@ -4205,7 +4584,9 @@ fn repair_primary_model(config: &mut serde_json::Value) {
         .map(|value| value.to_string());
 
     let next_primary = match current_primary {
-        Some(current) if available_refs.iter().any(|candidate| candidate == &current) => Some(current),
+        Some(current) if available_refs.iter().any(|candidate| candidate == &current) => {
+            Some(current)
+        }
         _ => available_refs.first().cloned(),
     };
 
@@ -4213,7 +4594,10 @@ fn repair_primary_model(config: &mut serde_json::Value) {
         config["agents"]["defaults"]["model"] = serde_json::json!({});
     }
 
-    if let Some(model_obj) = config.pointer_mut("/agents/defaults/model").and_then(|v| v.as_object_mut()) {
+    if let Some(model_obj) = config
+        .pointer_mut("/agents/defaults/model")
+        .and_then(|v| v.as_object_mut())
+    {
         match next_primary {
             Some(primary) => {
                 model_obj.insert("primary".to_string(), serde_json::Value::String(primary));
@@ -4247,7 +4631,10 @@ fn sync_primary_model_to_agents(
 ) -> usize {
     let mut updated = 0;
 
-    if let Some(agent_list) = config.pointer_mut("/agents/list").and_then(|v| v.as_array_mut()) {
+    if let Some(agent_list) = config
+        .pointer_mut("/agents/list")
+        .and_then(|v| v.as_array_mut())
+    {
         for agent in agent_list {
             let current_primary = agent
                 .get("model")
@@ -4269,7 +4656,10 @@ fn sync_primary_model_to_agents(
                 agent["model"] = serde_json::json!({});
             }
 
-            if let Some(model_obj) = agent.get_mut("model").and_then(|value| value.as_object_mut()) {
+            if let Some(model_obj) = agent
+                .get_mut("model")
+                .and_then(|value| value.as_object_mut())
+            {
                 model_obj.insert(
                     "primary".to_string(),
                     serde_json::Value::String(next_primary.to_string()),
@@ -4284,11 +4674,21 @@ fn sync_primary_model_to_agents(
 
 #[tauri::command]
 fn sync_models_to_provider(
-    provider_name: String, base_url: String, api_key: String, model_ids: Vec<String>,
+    provider_name: String,
+    base_url: String,
+    api_key: String,
+    model_ids: Vec<String>,
 ) -> CommandResult {
     let mut config = match read_openclaw_config() {
         Some(c) => c,
-        None => return CommandResult { success: false, stdout: String::new(), stderr: "配置文件读取失败".into(), code: Some(1) },
+        None => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "配置文件读取失败".into(),
+                code: Some(1),
+            }
+        }
     };
 
     // Ensure models.providers exists
@@ -4299,16 +4699,24 @@ fn sync_models_to_provider(
     let providers = config["models"]["providers"].as_object_mut().unwrap();
 
     // Get existing model IDs for this provider
-    let existing_ids: Vec<String> = providers.get(&provider_name)
+    let existing_ids: Vec<String> = providers
+        .get(&provider_name)
         .and_then(|p| p.get("models"))
         .and_then(|m| m.as_array())
-        .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string())).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut new_models = Vec::new();
     let mut skip = 0;
     for mid in &model_ids {
-        if existing_ids.contains(mid) { skip += 1; continue; }
+        if existing_ids.contains(mid) {
+            skip += 1;
+            continue;
+        }
         new_models.push(build_model_json(mid));
     }
 
@@ -4316,25 +4724,34 @@ fn sync_models_to_provider(
         return CommandResult {
             success: true,
             stdout: format!("跳过 {} 个已存在的模型，没有新模型需要添加", skip),
-            stderr: String::new(), code: Some(0),
+            stderr: String::new(),
+            code: Some(0),
         };
     }
 
     if let Some(provider) = providers.get_mut(&provider_name) {
         if let Some(models) = provider.get_mut("models").and_then(|m| m.as_array_mut()) {
-            for m in &new_models { models.push(m.clone()); }
+            for m in &new_models {
+                models.push(m.clone());
+            }
         }
     } else {
-        providers.insert(provider_name.clone(), serde_json::json!({
-            "baseUrl": base_url,
-            "apiKey": api_key,
-            "api": "openai-completions",
-            "models": new_models
-        }));
+        providers.insert(
+            provider_name.clone(),
+            serde_json::json!({
+                "baseUrl": base_url,
+                "apiKey": api_key,
+                "api": "openai-completions",
+                "models": new_models
+            }),
+        );
     }
 
     // Add to agents.defaults.models
-    if let Some(defaults_models) = config.pointer_mut("/agents/defaults/models").and_then(|v| v.as_object_mut()) {
+    if let Some(defaults_models) = config
+        .pointer_mut("/agents/defaults/models")
+        .and_then(|v| v.as_object_mut())
+    {
         for mid in &model_ids {
             let ref_key = format!("{}/{}", provider_name, mid);
             if !defaults_models.contains_key(&ref_key) {
@@ -4346,10 +4763,21 @@ fn sync_models_to_provider(
     match write_openclaw_config(&config) {
         Ok(_) => CommandResult {
             success: true,
-            stdout: format!("已添加 {} 个模型到 {}（跳过 {} 个已存在）", new_models.len(), provider_name, skip),
-            stderr: String::new(), code: Some(0),
+            stdout: format!(
+                "已添加 {} 个模型到 {}（跳过 {} 个已存在）",
+                new_models.len(),
+                provider_name,
+                skip
+            ),
+            stderr: String::new(),
+            code: Some(0),
         },
-        Err(e) => CommandResult { success: false, stdout: String::new(), stderr: e, code: Some(1) },
+        Err(e) => CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: e,
+            code: Some(1),
+        },
     }
 }
 
@@ -4391,7 +4819,12 @@ fn reconcile_provider_models(
 
     let existing_ids = existing_models
         .iter()
-        .filter_map(|model| model.get("id").and_then(|value| value.as_str()).map(|value| value.to_string()))
+        .filter_map(|model| {
+            model
+                .get("id")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        })
         .collect::<Vec<_>>();
     let existing_id_set = existing_ids.iter().cloned().collect::<BTreeSet<_>>();
 
@@ -4407,7 +4840,10 @@ fn reconcile_provider_models(
         .collect::<Vec<_>>();
 
     if selected_model_ids.is_empty() {
-        if let Some(providers) = config.pointer_mut("/models/providers").and_then(|value| value.as_object_mut()) {
+        if let Some(providers) = config
+            .pointer_mut("/models/providers")
+            .and_then(|value| value.as_object_mut())
+        {
             providers.remove(&provider_name);
         }
     } else {
@@ -4416,13 +4852,18 @@ fn reconcile_provider_models(
             .map(|model_id| {
                 existing_models
                     .iter()
-                    .find(|model| model.get("id").and_then(|value| value.as_str()) == Some(model_id.as_str()))
+                    .find(|model| {
+                        model.get("id").and_then(|value| value.as_str()) == Some(model_id.as_str())
+                    })
                     .cloned()
                     .unwrap_or_else(|| build_model_json(model_id))
             })
             .collect::<Vec<_>>();
 
-        if let Some(providers) = config.pointer_mut("/models/providers").and_then(|value| value.as_object_mut()) {
+        if let Some(providers) = config
+            .pointer_mut("/models/providers")
+            .and_then(|value| value.as_object_mut())
+        {
             providers.insert(
                 provider_name.clone(),
                 serde_json::json!({
@@ -4435,7 +4876,10 @@ fn reconcile_provider_models(
         }
     }
 
-    if let Some(defaults_models) = config.pointer_mut("/agents/defaults/models").and_then(|value| value.as_object_mut()) {
+    if let Some(defaults_models) = config
+        .pointer_mut("/agents/defaults/models")
+        .and_then(|value| value.as_object_mut())
+    {
         for model_id in &removed_ids {
             defaults_models.remove(&format!("{}/{}", provider_name, model_id));
         }
@@ -4465,7 +4909,11 @@ fn reconcile_provider_models(
             if selected_model_ids.is_empty() {
                 parts.push(format!("已清空 {} 的全部模型", provider_name));
             } else {
-                parts.push(format!("{} 当前保留 {} 个模型", provider_name, selected_model_ids.len()));
+                parts.push(format!(
+                    "{} 当前保留 {} 个模型",
+                    provider_name,
+                    selected_model_ids.len()
+                ));
             }
 
             if !added_ids.is_empty() {
@@ -4504,22 +4952,44 @@ fn reconcile_provider_models(
 fn delete_provider(provider_name: String) -> CommandResult {
     let mut config = match read_openclaw_config() {
         Some(c) => c,
-        None => return CommandResult { success: false, stdout: String::new(), stderr: "配置文件读取失败".into(), code: Some(1) },
+        None => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "配置文件读取失败".into(),
+                code: Some(1),
+            }
+        }
     };
 
-    let model_count = config.pointer(&format!("/models/providers/{}/models", provider_name))
-        .and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+    let model_count = config
+        .pointer(&format!("/models/providers/{}/models", provider_name))
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
 
     // Remove provider
-    if let Some(providers) = config.pointer_mut("/models/providers").and_then(|v| v.as_object_mut()) {
+    if let Some(providers) = config
+        .pointer_mut("/models/providers")
+        .and_then(|v| v.as_object_mut())
+    {
         providers.remove(&provider_name);
     }
 
     // Remove from agents.defaults.models
     let prefix = format!("{}/", provider_name);
-    if let Some(defaults_models) = config.pointer_mut("/agents/defaults/models").and_then(|v| v.as_object_mut()) {
-        let keys: Vec<String> = defaults_models.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
-        for k in keys { defaults_models.remove(&k); }
+    if let Some(defaults_models) = config
+        .pointer_mut("/agents/defaults/models")
+        .and_then(|v| v.as_object_mut())
+    {
+        let keys: Vec<String> = defaults_models
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned()
+            .collect();
+        for k in keys {
+            defaults_models.remove(&k);
+        }
     }
 
     repair_primary_model(&mut config);
@@ -4528,9 +4998,15 @@ fn delete_provider(provider_name: String) -> CommandResult {
         Ok(_) => CommandResult {
             success: true,
             stdout: format!("已删除 {}（{} 个模型）", provider_name, model_count),
-            stderr: String::new(), code: Some(0),
+            stderr: String::new(),
+            code: Some(0),
         },
-        Err(e) => CommandResult { success: false, stdout: String::new(), stderr: e, code: Some(1) },
+        Err(e) => CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: e,
+            code: Some(1),
+        },
     }
 }
 
@@ -4538,11 +5014,21 @@ fn delete_provider(provider_name: String) -> CommandResult {
 fn set_primary_model(model_ref: String) -> CommandResult {
     let mut config = match read_openclaw_config() {
         Some(c) => c,
-        None => return CommandResult { success: false, stdout: String::new(), stderr: "配置文件读取失败".into(), code: Some(1) },
+        None => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "配置文件读取失败".into(),
+                code: Some(1),
+            }
+        }
     };
 
     let available_refs = collect_model_refs(&config);
-    if !available_refs.iter().any(|candidate| candidate == &model_ref) {
+    if !available_refs
+        .iter()
+        .any(|candidate| candidate == &model_ref)
+    {
         return CommandResult {
             success: false,
             stdout: String::new(),
@@ -4571,23 +5057,29 @@ fn set_primary_model(model_ref: String) -> CommandResult {
     }
 
     ensure_default_model_ref(&mut config, &model_ref);
-    let updated_agents = sync_primary_model_to_agents(
-        &mut config,
-        previous_primary.as_deref(),
-        &model_ref,
-    );
+    let updated_agents =
+        sync_primary_model_to_agents(&mut config, previous_primary.as_deref(), &model_ref);
 
     match write_openclaw_config(&config) {
         Ok(_) => CommandResult {
             success: true,
             stdout: if updated_agents > 0 {
-                format!("主模型已设置为 {}，并同步更新了 {} 个 agent", model_ref, updated_agents)
+                format!(
+                    "主模型已设置为 {}，并同步更新了 {} 个 agent",
+                    model_ref, updated_agents
+                )
             } else {
                 format!("主模型已设置为 {}", model_ref)
             },
-            stderr: String::new(), code: Some(0),
+            stderr: String::new(),
+            code: Some(0),
         },
-        Err(e) => CommandResult { success: false, stdout: String::new(), stderr: e, code: Some(1) },
+        Err(e) => CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: e,
+            code: Some(1),
+        },
     }
 }
 
@@ -4595,17 +5087,33 @@ fn set_primary_model(model_ref: String) -> CommandResult {
 fn remove_models_from_provider(provider_name: String, model_ids: Vec<String>) -> CommandResult {
     let mut config = match read_openclaw_config() {
         Some(c) => c,
-        None => return CommandResult { success: false, stdout: String::new(), stderr: "配置文件读取失败".into(), code: Some(1) },
+        None => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "配置文件读取失败".into(),
+                code: Some(1),
+            }
+        }
     };
 
-    if let Some(models) = config.pointer_mut(&format!("/models/providers/{}/models", provider_name)).and_then(|v| v.as_array_mut()) {
+    if let Some(models) = config
+        .pointer_mut(&format!("/models/providers/{}/models", provider_name))
+        .and_then(|v| v.as_array_mut())
+    {
         models.retain(|m| {
-            m.get("id").and_then(|v| v.as_str()).map(|id| !model_ids.contains(&id.to_string())).unwrap_or(true)
+            m.get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| !model_ids.contains(&id.to_string()))
+                .unwrap_or(true)
         });
     }
 
     // Remove from agents.defaults.models
-    if let Some(defaults_models) = config.pointer_mut("/agents/defaults/models").and_then(|v| v.as_object_mut()) {
+    if let Some(defaults_models) = config
+        .pointer_mut("/agents/defaults/models")
+        .and_then(|v| v.as_object_mut())
+    {
         for mid in &model_ids {
             defaults_models.remove(&format!("{}/{}", provider_name, mid));
         }
@@ -4615,10 +5123,17 @@ fn remove_models_from_provider(provider_name: String, model_ids: Vec<String>) ->
 
     match write_openclaw_config(&config) {
         Ok(_) => CommandResult {
-            success: true, stdout: format!("已从 {} 移除 {} 个模型", provider_name, model_ids.len()),
-            stderr: String::new(), code: Some(0),
+            success: true,
+            stdout: format!("已从 {} 移除 {} 个模型", provider_name, model_ids.len()),
+            stderr: String::new(),
+            code: Some(0),
         },
-        Err(e) => CommandResult { success: false, stdout: String::new(), stderr: e, code: Some(1) },
+        Err(e) => CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: e,
+            code: Some(1),
+        },
     }
 }
 
@@ -4676,9 +5191,33 @@ fn open_in_external_terminal(command: &str, success_message: &str) -> CommandRes
 
     let linux_script = format!("{command}; printf '\\n'; read -r -p '按回车关闭窗口...' _");
     let terminal_candidates = [
-        ("x-terminal-emulator", vec!["-e".to_string(), "sh".to_string(), "-lc".to_string(), linux_script.clone()]),
-        ("gnome-terminal", vec!["--".to_string(), "sh".to_string(), "-lc".to_string(), linux_script.clone()]),
-        ("konsole", vec!["-e".to_string(), "sh".to_string(), "-lc".to_string(), linux_script.clone()]),
+        (
+            "x-terminal-emulator",
+            vec![
+                "-e".to_string(),
+                "sh".to_string(),
+                "-lc".to_string(),
+                linux_script.clone(),
+            ],
+        ),
+        (
+            "gnome-terminal",
+            vec![
+                "--".to_string(),
+                "sh".to_string(),
+                "-lc".to_string(),
+                linux_script.clone(),
+            ],
+        ),
+        (
+            "konsole",
+            vec![
+                "-e".to_string(),
+                "sh".to_string(),
+                "-lc".to_string(),
+                linux_script.clone(),
+            ],
+        ),
     ];
 
     for (program, args) in terminal_candidates {
@@ -4720,12 +5259,42 @@ fn open_update_terminal() -> CommandResult {
     )
 }
 
+#[tauri::command]
+fn open_feishu_plugin_terminal(action: Option<String>) -> CommandResult {
+    let action = action
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("install");
+
+    match action {
+        "install" => open_in_external_terminal(
+            "npx -y @larksuite/openclaw-lark-tools install",
+            "已在外部终端中打开飞书插件安装命令",
+        ),
+        "update" => open_in_external_terminal(
+            "npx -y @larksuite/openclaw-lark-tools update",
+            "已在外部终端中打开飞书插件更新命令",
+        ),
+        "doctor" => open_in_external_terminal(
+            "npx -y @larksuite/openclaw-lark-tools doctor",
+            "已在外部终端中打开飞书插件诊断命令",
+        ),
+        _ => CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: format!("不支持的飞书插件动作: {}", action),
+            code: Some(1),
+        },
+    }
+}
+
 fn merge_feishu_channels_from_config(payload: &mut serde_json::Value) {
     let Some(config) = read_openclaw_config() else {
         return;
     };
-    let Some(accounts) = config
-        .pointer("/channels/feishu/accounts")
+    let Some(feishu) = config
+        .pointer("/channels/feishu")
         .and_then(|value| value.as_object())
     else {
         return;
@@ -4738,19 +5307,86 @@ fn merge_feishu_channels_from_config(payload: &mut serde_json::Value) {
         payload["chat"]["feishu"] = serde_json::json!({});
     }
 
+    let accounts = feishu
+        .get("accounts")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    if accounts.is_empty() {
+        let has_root_config = feishu
+            .get("appId")
+            .and_then(|value| value.as_str())
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+            || feishu
+                .get("appSecret")
+                .and_then(|value| value.as_str())
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            || feishu
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            || feishu
+                .get("botName")
+                .and_then(|value| value.as_str())
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+
+        if !has_root_config {
+            return;
+        }
+
+        let account_id = feishu
+            .get("defaultAccount")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("default");
+        let entry = payload["chat"]["feishu"][account_id].take();
+        let name = entry
+            .get("name")
+            .and_then(|value| value.as_str())
+            .or_else(|| feishu.get("name").and_then(|value| value.as_str()))
+            .or_else(|| feishu.get("botName").and_then(|value| value.as_str()))
+            .unwrap_or(account_id);
+        let enabled = entry
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or_else(|| {
+                feishu
+                    .get("enabled")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(true)
+            });
+
+        payload["chat"]["feishu"][account_id] = serde_json::json!({
+            "name": name,
+            "enabled": enabled,
+        });
+
+        return;
+    }
+
     for (account_id, account_value) in accounts {
         let account = account_value.as_object().cloned().unwrap_or_default();
-        let entry = payload["chat"]["feishu"][account_id].take();
+        let entry = payload["chat"]["feishu"][account_id.as_str()].take();
         let name = entry
             .get("name")
             .and_then(|value| value.as_str())
             .or_else(|| account.get("name").and_then(|value| value.as_str()))
             .or_else(|| account.get("botName").and_then(|value| value.as_str()))
-            .unwrap_or(account_id);
+            .unwrap_or(account_id.as_str());
         let enabled = entry
             .get("enabled")
             .and_then(|value| value.as_bool())
-            .unwrap_or_else(|| account.get("enabled").and_then(|value| value.as_bool()).unwrap_or(true));
+            .unwrap_or_else(|| {
+                account
+                    .get("enabled")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(true)
+            });
 
         payload["chat"]["feishu"][account_id] = serde_json::json!({
             "name": name,
@@ -4797,9 +5433,17 @@ fn get_feishu_channel_config(account_id: Option<String>) -> CommandResult {
         "displayName": account.get("name")
             .and_then(|value| value.as_str())
             .or_else(|| account.get("botName").and_then(|value| value.as_str()))
+            .or_else(|| feishu.get("name").and_then(|value| value.as_str()))
+            .or_else(|| feishu.get("botName").and_then(|value| value.as_str()))
             .unwrap_or(""),
-        "appId": account.get("appId").and_then(|value| value.as_str()).unwrap_or(""),
-        "appSecret": account.get("appSecret").and_then(|value| value.as_str()).unwrap_or(""),
+        "appId": account.get("appId")
+            .and_then(|value| value.as_str())
+            .or_else(|| feishu.get("appId").and_then(|value| value.as_str()))
+            .unwrap_or(""),
+        "appSecret": account.get("appSecret")
+            .and_then(|value| value.as_str())
+            .or_else(|| feishu.get("appSecret").and_then(|value| value.as_str()))
+            .unwrap_or(""),
         "domain": account.get("domain")
             .and_then(|value| value.as_str())
             .or_else(|| feishu.get("domain").and_then(|value| value.as_str()))
@@ -4930,7 +5574,8 @@ fn save_feishu_channel(
 
     config["channels"]["feishu"]["accounts"][account_id]["enabled"] = serde_json::json!(true);
     config["channels"]["feishu"]["accounts"][account_id]["appId"] = serde_json::json!(app_id);
-    config["channels"]["feishu"]["accounts"][account_id]["appSecret"] = serde_json::json!(app_secret);
+    config["channels"]["feishu"]["accounts"][account_id]["appSecret"] =
+        serde_json::json!(app_secret);
     if let Some(name) = display_name {
         config["channels"]["feishu"]["accounts"][account_id]["name"] = serde_json::json!(name);
         config["channels"]["feishu"]["accounts"][account_id]["botName"] = serde_json::json!(name);
@@ -4956,17 +5601,23 @@ fn save_feishu_channel(
 #[tauri::command]
 async fn list_channels() -> CommandResult {
     tokio::task::spawn_blocking(move || {
-        let args = vec!["channels".to_string(), "list".to_string(), "--json".to_string()];
+        let args = vec![
+            "channels".to_string(),
+            "list".to_string(),
+            "--json".to_string(),
+        ];
         let result = run_openclaw_args_timeout(&args, Duration::from_secs(5));
         if !result.success {
             return result;
         }
 
-        let mut payload = parse_json_value_from_output(&result.stdout).unwrap_or_else(|| serde_json::json!({
-            "chat": {},
-            "auth": [],
-            "usage": { "providers": [] },
-        }));
+        let mut payload = parse_json_value_from_output(&result.stdout).unwrap_or_else(|| {
+            serde_json::json!({
+                "chat": {},
+                "auth": [],
+                "usage": { "providers": [] },
+            })
+        });
         merge_feishu_channels_from_config(&mut payload);
 
         CommandResult {
@@ -4988,7 +5639,11 @@ async fn list_channels() -> CommandResult {
 #[tauri::command]
 async fn get_channel_status() -> CommandResult {
     tokio::task::spawn_blocking(move || {
-        let args = vec!["channels".to_string(), "status".to_string(), "--json".to_string()];
+        let args = vec![
+            "channels".to_string(),
+            "status".to_string(),
+            "--json".to_string(),
+        ];
         let result = run_openclaw_args_timeout(&args, Duration::from_secs(6));
         if !result.success {
             return result;
@@ -5035,6 +5690,46 @@ async fn remove_channel(channel: String, account: Option<String>) -> CommandResu
             .to_string();
         let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
 
+        let has_root_feishu = config.pointer("/channels/feishu").is_some();
+        let has_account_map = config
+            .pointer("/channels/feishu/accounts")
+            .and_then(|value| value.as_object())
+            .map(|value| !value.is_empty())
+            .unwrap_or(false);
+
+        if !has_account_map {
+            if !has_root_feishu {
+                return CommandResult {
+                    success: true,
+                    stdout: "飞书频道配置已不存在".to_string(),
+                    stderr: String::new(),
+                    code: Some(0),
+                };
+            }
+
+            if let Some(channels) = config
+                .get_mut("channels")
+                .and_then(|value| value.as_object_mut())
+            {
+                channels.remove("feishu");
+            }
+
+            return match write_openclaw_config(&config) {
+                Ok(_) => CommandResult {
+                    success: true,
+                    stdout: "已移除飞书频道配置".to_string(),
+                    stderr: String::new(),
+                    code: Some(0),
+                },
+                Err(error) => CommandResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: error,
+                    code: Some(1),
+                },
+            };
+        }
+
         let Some(accounts) = config
             .pointer_mut("/channels/feishu/accounts")
             .and_then(|value| value.as_object_mut())
@@ -5051,7 +5746,10 @@ async fn remove_channel(channel: String, account: Option<String>) -> CommandResu
 
         let remaining_accounts = accounts.keys().cloned().collect::<Vec<_>>();
         if remaining_accounts.is_empty() {
-            if let Some(channels) = config.get_mut("channels").and_then(|value| value.as_object_mut()) {
+            if let Some(channels) = config
+                .get_mut("channels")
+                .and_then(|value| value.as_object_mut())
+            {
                 channels.remove("feishu");
             }
         } else {
@@ -5060,7 +5758,8 @@ async fn remove_channel(channel: String, account: Option<String>) -> CommandResu
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
             if current_default == account_id {
-                config["channels"]["feishu"]["defaultAccount"] = serde_json::json!(remaining_accounts[0].clone());
+                config["channels"]["feishu"]["defaultAccount"] =
+                    serde_json::json!(remaining_accounts[0].clone());
             }
         }
 
@@ -5202,26 +5901,35 @@ async fn validate_api_key(
 pub struct SkillInstallStatus {
     pub id: String,
     pub name: String,
-    pub status: String,  // pending | installing | completed | failed
+    pub status: String, // pending | installing | completed | failed
     pub error: Option<String>,
 }
 
 #[tauri::command]
 async fn install_default_skills(app: AppHandle) -> CommandResult {
     tokio::task::spawn_blocking(move || {
-        let _ = app.emit("skill-install-log", InstallEvent {
-            level: "info".into(),
-            message: "OpenClaw 当前版本已内置基础 bundled skills。".into(),
-        });
-        let _ = app.emit("skill-install-log", InstallEvent {
-            level: "info".into(),
-            message: "如需更多扩展，请在控制面板里打开 ClawHub 后按需安装。".into(),
-        });
+        let _ = app.emit(
+            "skill-install-log",
+            InstallEvent {
+                level: "info".into(),
+                message: "OpenClaw 当前版本已内置基础 bundled skills。".into(),
+            },
+        );
+        let _ = app.emit(
+            "skill-install-log",
+            InstallEvent {
+                level: "info".into(),
+                message: "如需更多扩展，请在控制面板里打开 ClawHub 后按需安装。".into(),
+            },
+        );
 
-        let _ = app.emit("skill-install-log", InstallEvent {
-            level: "done".into(),
-            message: "success".into(),
-        });
+        let _ = app.emit(
+            "skill-install-log",
+            InstallEvent {
+                level: "done".into(),
+                message: "success".into(),
+            },
+        );
 
         CommandResult {
             success: true,
@@ -5246,26 +5954,28 @@ async fn start_gateway_with_recovery(app: AppHandle, port: Option<u16>) -> Comma
     let port = port.unwrap_or(18789);
 
     tokio::task::spawn_blocking(move || {
-        let _ = app.emit("gateway-log", InstallEvent {
-            level: "info".into(),
-            message: "正在启动网关...".into(),
-        });
+        let _ = app.emit(
+            "gateway-log",
+            InstallEvent {
+                level: "info".into(),
+                message: "正在启动网关...".into(),
+            },
+        );
 
         // Phase 1: Try to start gateway through the official CLI entrypoint
         let start_args = vec!["gateway".to_string(), "start".to_string()];
-        let start = run_logged_openclaw_command(
-            &app,
-            "gateway-log",
-            &start_args,
-            Duration::from_secs(20),
-        );
+        let start =
+            run_logged_openclaw_command(&app, "gateway-log", &start_args, Duration::from_secs(20));
         let (ready, _) = wait_for_gateway_ready(port, 6, Duration::from_secs(2));
 
         if ready {
-            let _ = app.emit("gateway-log", InstallEvent {
-                level: "info".into(),
-                message: format!("网关已启动，端口 {} 就绪", port),
-            });
+            let _ = app.emit(
+                "gateway-log",
+                InstallEvent {
+                    level: "info".into(),
+                    message: format!("网关已启动，端口 {} 就绪", port),
+                },
+            );
             return CommandResult {
                 success: true,
                 stdout: format!("网关运行在端口 {}", port),
@@ -5275,23 +5985,25 @@ async fn start_gateway_with_recovery(app: AppHandle, port: Option<u16>) -> Comma
         }
 
         // Phase 2: Auto-recovery with openclaw doctor --fix
-        let _ = app.emit("gateway-log", InstallEvent {
-            level: "warn".into(),
-            message: "网关启动失败，正在尝试自动修复 (openclaw doctor --fix)...".into(),
-        });
+        let _ = app.emit(
+            "gateway-log",
+            InstallEvent {
+                level: "warn".into(),
+                message: "网关启动失败，正在尝试自动修复 (openclaw doctor --fix)...".into(),
+            },
+        );
 
         let doctor_args = vec!["doctor".to_string(), "--fix".to_string()];
-        let doctor = run_logged_openclaw_command(
-            &app,
-            "gateway-log",
-            &doctor_args,
-            Duration::from_secs(30),
-        );
+        let doctor =
+            run_logged_openclaw_command(&app, "gateway-log", &doctor_args, Duration::from_secs(30));
         if doctor.success {
-            let _ = app.emit("gateway-log", InstallEvent {
-                level: "info".into(),
-                message: "修复完成，正在重新启动网关...".into(),
-            });
+            let _ = app.emit(
+                "gateway-log",
+                InstallEvent {
+                    level: "info".into(),
+                    message: "修复完成，正在重新启动网关...".into(),
+                },
+            );
 
             let _ = run_logged_openclaw_command(
                 &app,
@@ -5302,10 +6014,13 @@ async fn start_gateway_with_recovery(app: AppHandle, port: Option<u16>) -> Comma
             let (ready_after_fix, _) = wait_for_gateway_ready(port, 6, Duration::from_secs(2));
 
             if ready_after_fix {
-                let _ = app.emit("gateway-log", InstallEvent {
-                    level: "info".into(),
-                    message: format!("修复后网关启动成功，端口 {} 就绪", port),
-                });
+                let _ = app.emit(
+                    "gateway-log",
+                    InstallEvent {
+                        level: "info".into(),
+                        message: format!("修复后网关启动成功，端口 {} 就绪", port),
+                    },
+                );
                 return CommandResult {
                     success: true,
                     stdout: format!("网关运行在端口 {} (修复后)", port),
@@ -5315,10 +6030,15 @@ async fn start_gateway_with_recovery(app: AppHandle, port: Option<u16>) -> Comma
             }
         }
 
-        let _ = app.emit("gateway-log", InstallEvent {
-            level: "error".into(),
-            message: "网关启动失败，请检查 `openclaw gateway status` 和 `openclaw doctor --fix` 输出".into(),
-        });
+        let _ = app.emit(
+            "gateway-log",
+            InstallEvent {
+                level: "error".into(),
+                message:
+                    "网关启动失败，请检查 `openclaw gateway status` 和 `openclaw doctor --fix` 输出"
+                        .into(),
+            },
+        );
 
         CommandResult {
             success: false,
@@ -5359,7 +6079,11 @@ fn get_gateway_logs() -> CommandResult {
         }
         Err(_) => {
             let gateway_status = run_openclaw_args_timeout(
-                &["gateway".to_string(), "status".to_string(), "--json".to_string()],
+                &[
+                    "gateway".to_string(),
+                    "status".to_string(),
+                    "--json".to_string(),
+                ],
                 Duration::from_secs(8),
             );
             if gateway_status.success {
@@ -5412,12 +6136,14 @@ fn get_gateway_logs() -> CommandResult {
 fn get_gateway_token() -> CommandResult {
     let config = match read_openclaw_config() {
         Some(v) => v,
-        None => return CommandResult {
-            success: false,
-            stdout: String::new(),
-            stderr: "Config file not found".into(),
-            code: Some(1),
-        },
+        None => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "Config file not found".into(),
+                code: Some(1),
+            }
+        }
     };
 
     let token = config
@@ -5481,6 +6207,7 @@ pub fn run() {
             remove_models_from_provider,
             open_channel_setup_terminal,
             open_update_terminal,
+            open_feishu_plugin_terminal,
             list_channels,
             get_feishu_channel_config,
             get_channel_status,

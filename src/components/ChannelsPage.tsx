@@ -1,8 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  Check,
-  ChevronDown,
   ExternalLink,
   Loader2,
   MessageSquare,
@@ -35,16 +33,10 @@ interface ChannelStatus {
   message: string;
 }
 
-interface FeishuChannelForm {
-  accountId: string;
-  displayName: string;
-  appId: string;
-  appSecret: string;
-  domain: "feishu" | "lark";
-  connectionMode: "websocket" | "webhook";
-  verificationToken: string;
-  encryptKey: string;
-}
+type FeishuTerminalAction = "install" | "update" | "doctor";
+
+const FEISHU_GUIDE_URL = "https://bytedance.larkoffice.com/docx/MFK7dDFLFoVlOGxWCv5cTXKmnMh";
+const FEISHU_ARTICLE_URL = "https://www.feishu.cn/content/article/7613711414611463386";
 
 const CHANNEL_LABELS: Record<string, { label: string; color: string }> = {
   telegram: { label: "Telegram", color: "bg-sky-500/15 text-sky-400" },
@@ -64,115 +56,25 @@ const CHANNEL_LABELS: Record<string, { label: string; color: string }> = {
   zalo: { label: "Zalo", color: "bg-blue-500/15 text-blue-400" },
 };
 
-const inputCls = "w-full h-9 px-3 text-[13px] rounded-lg border border-white/[0.08] bg-white/[0.03] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/30 transition-colors";
-
-const emptyFeishuForm: FeishuChannelForm = {
-  accountId: "default",
-  displayName: "",
-  appId: "",
-  appSecret: "",
-  domain: "feishu",
-  connectionMode: "websocket",
-  verificationToken: "",
-  encryptKey: "",
-};
-
-const FEISHU_DOMAIN_OPTIONS = [
-  { value: "feishu", label: "飞书（中国区）", description: "适合国内飞书租户" },
-  { value: "lark", label: "Lark（国际版）", description: "适合海外或国际租户" },
-] as const;
-
-const FEISHU_CONNECTION_OPTIONS = [
-  { value: "websocket", label: "WebSocket", description: "实时收消息，适合多数桌面场景" },
-  { value: "webhook", label: "Webhook", description: "适合固定公网回调地址" },
-] as const;
-
-interface DialogSelectFieldProps {
-  label: string;
-  menuLabel: string;
-  value: string;
-  options: ReadonlyArray<{ value: string; label: string; description: string }>;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onValueChange: (value: string) => void;
-  menuRef: RefObject<HTMLDivElement | null>;
-}
-
-function DialogSelectField({
-  label,
-  menuLabel,
-  value,
-  options,
-  open,
-  onOpenChange,
-  onValueChange,
-  menuRef,
-}: DialogSelectFieldProps) {
-  const selected = options.find((option) => option.value === value) ?? options[0];
-
-  return (
-    <div ref={menuRef} className="relative">
-      <label className="mb-1.5 block text-[12px] text-muted-foreground">{label}</label>
-      <button
-        type="button"
-        className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2.5 text-left transition-colors hover:border-sky-500/25 hover:bg-white/[0.05] focus:outline-none focus:ring-1 focus:ring-primary/50"
-        onClick={() => onOpenChange(!open)}
-      >
-        <div className="min-w-0">
-          <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-            当前选项
-          </p>
-          <p className="mt-1 truncate text-[12px] font-medium text-foreground/90">
-            {selected.label}
-          </p>
-          <p className="mt-1 text-[11px] text-muted-foreground">
-            {selected.description}
-          </p>
-        </div>
-        <ChevronDown
-          size={15}
-          className={`shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
-        />
-      </button>
-
-      {open && (
-        <div className="absolute left-0 right-0 top-[calc(100%+8px)] z-30 overflow-hidden rounded-xl border border-white/[0.08] bg-[#10141b] shadow-2xl shadow-black/35">
-          <div className="border-b border-white/[0.06] px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-            {menuLabel}
-          </div>
-          <div className="space-y-1 p-2">
-            {options.map((option) => {
-              const selectedOption = option.value === value;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={`flex w-full items-start justify-between gap-3 rounded-lg px-3 py-2 text-left transition-colors ${
-                    selectedOption ? "bg-sky-500/10 text-sky-100" : "hover:bg-white/[0.04]"
-                  }`}
-                  onClick={() => {
-                    onValueChange(option.value);
-                    onOpenChange(false);
-                  }}
-                >
-                  <div className="min-w-0">
-                    <p className="text-[12px] font-medium">{option.label}</p>
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      {option.description}
-                    </p>
-                  </div>
-                  <span className="pt-0.5">
-                    {selectedOption ? <Check size={14} className="text-sky-300" /> : null}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+const FEISHU_ACTIONS: Array<{
+  intent: "existing" | "new";
+  title: string;
+  description: string;
+  hint: string;
+}> = [
+  {
+    intent: "existing",
+    title: "关联已有机器人",
+    description: "适合你已经在飞书开放平台或之前的插件流程里创建过机器人，只想重新绑定到当前 OpenClaw。",
+    hint: "打开终端后，在安装流程里选择“关联已有机器人”，再用飞书扫码完成绑定。",
+  },
+  {
+    intent: "new",
+    title: "新建机器人",
+    description: "适合从零开始接入，扫码后可在飞书里一键创建新的 OpenClaw 机器人。",
+    hint: "打开终端后，在安装流程里选择“新建机器人”，扫码后继续完成创建。",
+  },
+];
 
 function getChannelInfo(ch: string) {
   return CHANNEL_LABELS[ch] ?? { label: ch, color: "bg-white/10 text-foreground/70" };
@@ -199,27 +101,6 @@ function parseJsonValue<T>(raw: string, fallback: T): T {
       }
     }
     return fallback;
-  }
-}
-
-function parseFeishuForm(raw: string): FeishuChannelForm | null {
-  try {
-    const data = parseJsonValue<Partial<FeishuChannelForm> | null>(raw, null);
-    if (!data) {
-      return null;
-    }
-    return {
-      accountId: (data.accountId ?? "default").trim() || "default",
-      displayName: data.displayName ?? "",
-      appId: data.appId ?? "",
-      appSecret: data.appSecret ?? "",
-      domain: data.domain === "lark" ? "lark" : "feishu",
-      connectionMode: data.connectionMode === "webhook" ? "webhook" : "websocket",
-      verificationToken: data.verificationToken ?? "",
-      encryptKey: data.encryptKey ?? "",
-    };
-  } catch {
-    return null;
   }
 }
 
@@ -503,13 +384,8 @@ export default function ChannelsPage() {
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
-  const [formLoading, setFormLoading] = useState(false);
-  const [formSaving, setFormSaving] = useState(false);
-  const [formError, setFormError] = useState("");
-  const [feishuForm, setFeishuForm] = useState<FeishuChannelForm>(emptyFeishuForm);
-  const [activeDialogMenu, setActiveDialogMenu] = useState<"domain" | "connection" | null>(null);
-  const domainMenuRef = useRef<HTMLDivElement | null>(null);
-  const connectionMenuRef = useRef<HTMLDivElement | null>(null);
+  const [actionLoading, setActionLoading] = useState<FeishuTerminalAction | null>(null);
+  const [actionMessage, setActionMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
 
   const fetchChannels = useCallback(async () => {
     setLoading(true);
@@ -579,23 +455,6 @@ export default function ChannelsPage() {
     void fetchStatus();
   }, [fetchChannels, fetchStatus]);
 
-  useEffect(() => {
-    if (!dialogOpen || !activeDialogMenu) {
-      return undefined;
-    }
-
-    const handlePointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (domainMenuRef.current?.contains(target) || connectionMenuRef.current?.contains(target)) {
-        return;
-      }
-      setActiveDialogMenu(null);
-    };
-
-    document.addEventListener("mousedown", handlePointerDown);
-    return () => document.removeEventListener("mousedown", handlePointerDown);
-  }, [activeDialogMenu, dialogOpen]);
-
   const refreshAll = useCallback(async () => {
     await Promise.all([fetchChannels(), fetchStatus()]);
   }, [fetchChannels, fetchStatus]);
@@ -604,41 +463,20 @@ export default function ChannelsPage() {
     statuses.find((entry) => entry.channel === channel && (entry.account === account || entry.account === "default"))
   ), [statuses]);
 
-  const loadFeishuForm = useCallback(async (accountId?: string) => {
-    setFormLoading(true);
-    setFormError("");
-    try {
-      const result: CommandResult = await invoke("get_feishu_channel_config", {
-        accountId: accountId || null,
-      });
-      if (!result.success) {
-        setFormError(result.stderr || "飞书配置加载失败");
-        return;
-      }
-      const parsed = parseFeishuForm(result.stdout);
-      setFeishuForm(parsed ?? { ...emptyFeishuForm, accountId: accountId || "default" });
-    } catch (e) {
-      setFormError(`${e}`);
-    } finally {
-      setFormLoading(false);
-    }
+  const openFeishuDialog = useCallback((accountId?: string) => {
+    setEditingAccountId(accountId ?? null);
+    setActionMessage(null);
+    setDialogOpen(true);
   }, []);
 
-  const openFeishuDialog = useCallback(async (accountId?: string) => {
-    setEditingAccountId(accountId ?? null);
-    setDialogOpen(true);
-    setActiveDialogMenu(null);
-    setFeishuForm({ ...emptyFeishuForm, accountId: accountId || "default" });
-    await loadFeishuForm(accountId);
-  }, [loadFeishuForm]);
-
-  const closeDialog = () => {
-    if (formSaving) return;
+  const closeDialog = useCallback(() => {
+    if (actionLoading) {
+      return;
+    }
     setDialogOpen(false);
     setEditingAccountId(null);
-    setFormError("");
-    setActiveDialogMenu(null);
-  };
+    setActionMessage(null);
+  }, [actionLoading]);
 
   const handleRemove = async (channel: string, account: string) => {
     if (!confirm(`确定移除 ${getChannelInfo(channel).label} (${account}) 吗？`)) return;
@@ -659,54 +497,39 @@ export default function ChannelsPage() {
     }
   };
 
-  const canSaveFeishu = useMemo(() => {
-    if (!feishuForm.accountId.trim() || !feishuForm.appId.trim() || !feishuForm.appSecret.trim()) {
-      return false;
-    }
-    if (feishuForm.connectionMode === "webhook") {
-      return Boolean(feishuForm.verificationToken.trim() && feishuForm.encryptKey.trim());
-    }
-    return true;
-  }, [feishuForm]);
-
-  const handleSaveFeishu = async () => {
-    if (!canSaveFeishu) {
-      setFormError("请先补全必填项");
-      return;
-    }
-
-    setFormSaving(true);
-    setFormError("");
+  const handleFeishuAction = useCallback(async (action: FeishuTerminalAction) => {
+    setActionLoading(action);
+    setActionMessage(null);
     try {
-      const result: CommandResult = await invoke("save_feishu_channel", {
-        accountId: feishuForm.accountId.trim(),
-        displayName: feishuForm.displayName.trim() || null,
-        appId: feishuForm.appId.trim(),
-        appSecret: feishuForm.appSecret.trim(),
-        domain: feishuForm.domain,
-        connectionMode: feishuForm.connectionMode,
-        verificationToken: feishuForm.verificationToken.trim() || null,
-        encryptKey: feishuForm.encryptKey.trim() || null,
-      });
-
+      const result: CommandResult = await invoke("open_feishu_plugin_terminal", { action });
       if (!result.success) {
-        setFormError(result.stderr || "飞书配置保存失败");
+        setActionMessage({
+          tone: "error",
+          text: result.stderr || "飞书插件命令启动失败",
+        });
         return;
       }
-
-      closeDialog();
-      await refreshAll();
+      const suffix = action === "install"
+        ? "完成扫码和终端向导后，回到这里点“刷新”即可看到新的频道。"
+        : "命令已经在外部终端启动，可以在终端里继续完成操作。";
+      setActionMessage({
+        tone: "success",
+        text: `${result.stdout}。${suffix}`,
+      });
     } catch (e) {
-      setFormError(`${e}`);
+      setActionMessage({
+        tone: "error",
+        text: `${e}`,
+      });
     } finally {
-      setFormSaving(false);
+      setActionLoading(null);
     }
-  };
+  }, []);
 
   return (
     <TooltipProvider delayDuration={300}>
       <ScrollArea className="flex-1">
-        <div className="p-5 space-y-4">
+        <div className="space-y-4 p-5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/10">
@@ -728,8 +551,8 @@ export default function ChannelsPage() {
                 </TooltipTrigger>
                 <TooltipContent>刷新</TooltipContent>
               </Tooltip>
-              <Button size="sm" variant="outline" onClick={() => void openFeishuDialog()}>
-                <Plus size={14} /> 添加飞书
+              <Button size="sm" variant="outline" onClick={() => openFeishuDialog()}>
+                <Plus size={14} /> 接入飞书
               </Button>
             </div>
           </div>
@@ -742,26 +565,26 @@ export default function ChannelsPage() {
 
           {loading ? (
             <div className="flex items-center justify-center py-20 text-muted-foreground">
-              <Loader2 size={18} className="animate-spin mr-2" />
+              <Loader2 size={18} className="mr-2 animate-spin" />
               <span className="text-[13px]">加载中...</span>
             </div>
           ) : channels.length === 0 ? (
             <Card>
               <CardContent className="py-16 text-center">
-                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-500/10 mx-auto mb-4">
+                <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-500/10">
                   <Radio size={22} className="text-violet-400" />
                 </div>
-                <h3 className="text-[14px] font-semibold mb-1">先接入一个飞书频道</h3>
-                <p className="text-[12px] text-muted-foreground mb-4 max-w-xs mx-auto">
-                  现在可以直接在控制面板里填写飞书 Bot 配置，不再需要额外打开终端。
+                <h3 className="mb-1 text-[14px] font-semibold">先接入一个飞书频道</h3>
+                <p className="mx-auto mb-4 max-w-sm text-[12px] text-muted-foreground">
+                  频道页已经切到飞书官方插件流程，不再手动填写 App ID / App Secret，支持扫码绑定已有机器人或新建机器人。
                 </p>
-                <div className="flex gap-2 justify-center">
-                  <Button size="sm" onClick={() => void openFeishuDialog()}>
-                    <Plus size={14} /> 配置飞书
+                <div className="flex justify-center gap-2">
+                  <Button size="sm" onClick={() => openFeishuDialog()}>
+                    <Plus size={14} /> 开始扫码绑定
                   </Button>
                   <Button size="sm" variant="outline" asChild>
-                    <a href="https://docs.openclaw.ai/channels/feishu" target="_blank" rel="noreferrer">
-                      <ExternalLink size={14} /> 飞书文档
+                    <a href={FEISHU_GUIDE_URL} target="_blank" rel="noreferrer">
+                      <ExternalLink size={14} /> 查看对接文档
                     </a>
                   </Button>
                 </div>
@@ -776,17 +599,17 @@ export default function ChannelsPage() {
                 const key = `${channel.channel}:${channel.account}`;
 
                 return (
-                  <Card key={key} className="group hover:border-violet-500/20 transition-colors">
+                  <Card key={key} className="group transition-colors hover:border-violet-500/20">
                     <CardContent className="p-4">
                       <div className="flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-3 min-w-0">
+                        <div className="flex min-w-0 items-center gap-3">
                           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/10">
                             <MessageSquare size={16} className="text-violet-400" />
                           </div>
                           <div className="min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
+                            <div className="flex flex-wrap items-center gap-2">
                               <span className="text-[13px] font-semibold">{channel.name}</span>
-                              <Badge variant="secondary" className={`text-[10px] px-1.5 py-0 ${info.color}`}>
+                              <Badge variant="secondary" className={`px-1.5 py-0 text-[10px] ${info.color}`}>
                                 {info.label}
                               </Badge>
                               {status && statusMeta && (
@@ -799,29 +622,29 @@ export default function ChannelsPage() {
                                 <Loader2 size={10} className="animate-spin text-muted-foreground" />
                               )}
                             </div>
-                            <p className="text-[11px] text-muted-foreground mt-0.5">
+                            <p className="mt-0.5 text-[11px] text-muted-foreground">
                               账号: {channel.account}
-                              {!channel.enabled && <span className="text-amber-400 ml-2">已禁用</span>}
+                              {!channel.enabled && <span className="ml-2 text-amber-400">已禁用</span>}
                             </p>
                             {status?.message && (
-                              <p className="text-[11px] text-muted-foreground mt-1">{status.message}</p>
+                              <p className="mt-1 text-[11px] text-muted-foreground">{status.message}</p>
                             )}
                           </div>
                         </div>
-                        <div className="flex items-center gap-1 shrink-0">
+                        <div className="flex shrink-0 items-center gap-1">
                           {channel.channel === "feishu" && (
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <Button
                                   variant="ghost"
                                   size="icon"
-                                  className="h-7 w-7 text-muted-foreground hover:text-sky-300 opacity-0 group-hover:opacity-100 transition-opacity"
-                                  onClick={() => void openFeishuDialog(channel.account)}
+                                  className="h-7 w-7 text-muted-foreground opacity-0 transition-opacity hover:text-sky-300 group-hover:opacity-100"
+                                  onClick={() => openFeishuDialog(channel.account)}
                                 >
                                   <Settings2 size={13} />
                                 </Button>
                               </TooltipTrigger>
-                              <TooltipContent>编辑飞书配置</TooltipContent>
+                              <TooltipContent>扫码新增或管理飞书插件</TooltipContent>
                             </Tooltip>
                           )}
                           <Tooltip>
@@ -829,7 +652,7 @@ export default function ChannelsPage() {
                               <Button
                                 variant="ghost"
                                 size="icon"
-                                className="h-7 w-7 text-muted-foreground hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                                className="h-7 w-7 text-muted-foreground opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
                                 onClick={() => void handleRemove(channel.channel, channel.account)}
                                 disabled={removing === key}
                               >
@@ -851,8 +674,8 @@ export default function ChannelsPage() {
 
       {dialogOpen && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm" onClick={closeDialog}>
-          <Card className="w-full max-w-2xl border-white/[0.08] bg-[#081017] shadow-2xl shadow-black/40" onClick={(event) => event.stopPropagation()}>
-            <CardContent className="max-h-[85vh] overflow-auto p-5 space-y-4">
+          <Card className="w-full max-w-3xl border-white/[0.08] bg-[#081017] shadow-2xl shadow-black/40" onClick={(event) => event.stopPropagation()}>
+            <CardContent className="max-h-[85vh] space-y-4 overflow-auto p-5">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
@@ -860,149 +683,108 @@ export default function ChannelsPage() {
                       <MessageSquare size={15} className="text-blue-400" />
                     </div>
                     <div>
-                      <h3 className="text-[13px] font-semibold">{editingAccountId ? "编辑飞书频道" : "添加飞书频道"}</h3>
+                      <h3 className="text-[13px] font-semibold">{editingAccountId ? "管理飞书接入" : "接入飞书官方插件"}</h3>
                       <p className="text-[11px] text-muted-foreground">
-                        直接写入 `channels.feishu` 配置；当前先支持飞书 Bot 的前端接入。
+                        通过官方插件安装命令完成扫码绑定；终端里可选择关联已有机器人，也可新建机器人。
                       </p>
                     </div>
                   </div>
                 </div>
-                <Button size="sm" variant="ghost" onClick={closeDialog} disabled={formSaving}>
+                <Button size="sm" variant="ghost" onClick={closeDialog} disabled={Boolean(actionLoading)}>
                   关闭
                 </Button>
               </div>
 
-              {formLoading ? (
-                <div className="flex items-center justify-center py-16 text-muted-foreground">
-                  <Loader2 size={18} className="mr-2 animate-spin" />
-                  <span className="text-[13px]">正在读取飞书配置...</span>
-                </div>
-              ) : (
-                <>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div>
-                      <label className="mb-1.5 block text-[12px] text-muted-foreground">账号 ID</label>
-                      <input
-                        className={inputCls}
-                        placeholder="default"
-                        value={feishuForm.accountId}
-                        onChange={(event) => setFeishuForm((prev) => ({ ...prev, accountId: event.target.value }))}
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-1.5 block text-[12px] text-muted-foreground">显示名称</label>
-                      <input
-                        className={inputCls}
-                        placeholder="例如 团队助手"
-                        value={feishuForm.displayName}
-                        onChange={(event) => setFeishuForm((prev) => ({ ...prev, displayName: event.target.value }))}
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-1.5 block text-[12px] text-muted-foreground">App ID</label>
-                      <input
-                        className={inputCls}
-                        placeholder="cli_xxx"
-                        value={feishuForm.appId}
-                        onChange={(event) => setFeishuForm((prev) => ({ ...prev, appId: event.target.value }))}
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-1.5 block text-[12px] text-muted-foreground">App Secret</label>
-                      <input
-                        type="password"
-                        className={inputCls}
-                        placeholder="输入飞书 App Secret"
-                        value={feishuForm.appSecret}
-                        onChange={(event) => setFeishuForm((prev) => ({ ...prev, appSecret: event.target.value }))}
-                      />
-                    </div>
-                    <div>
-                      <DialogSelectField
-                        label="域名环境"
-                        menuLabel="选择飞书环境"
-                        value={feishuForm.domain}
-                        options={FEISHU_DOMAIN_OPTIONS}
-                        open={activeDialogMenu === "domain"}
-                        onOpenChange={(open) => setActiveDialogMenu(open ? "domain" : null)}
-                        onValueChange={(value) => setFeishuForm((prev) => ({
-                          ...prev,
-                          domain: value === "lark" ? "lark" : "feishu",
-                        }))}
-                        menuRef={domainMenuRef}
-                      />
-                    </div>
-                    <div>
-                      <DialogSelectField
-                        label="连接方式"
-                        menuLabel="选择接入方式"
-                        value={feishuForm.connectionMode}
-                        options={FEISHU_CONNECTION_OPTIONS}
-                        open={activeDialogMenu === "connection"}
-                        onOpenChange={(open) => setActiveDialogMenu(open ? "connection" : null)}
-                        onValueChange={(value) => setFeishuForm((prev) => ({
-                          ...prev,
-                          connectionMode: value === "webhook" ? "webhook" : "websocket",
-                        }))}
-                        menuRef={connectionMenuRef}
-                      />
-                    </div>
-                  </div>
-
-                  {feishuForm.connectionMode === "webhook" && (
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <div>
-                        <label className="mb-1.5 block text-[12px] text-muted-foreground">Verification Token</label>
-                        <input
-                          className={inputCls}
-                          placeholder="Webhook 模式必填"
-                          value={feishuForm.verificationToken}
-                          onChange={(event) => setFeishuForm((prev) => ({ ...prev, verificationToken: event.target.value }))}
-                        />
-                      </div>
-                      <div>
-                        <label className="mb-1.5 block text-[12px] text-muted-foreground">Encrypt Key</label>
-                        <input
-                          type="password"
-                          className={inputCls}
-                          placeholder="Webhook 模式必填"
-                          value={feishuForm.encryptKey}
-                          onChange={(event) => setFeishuForm((prev) => ({ ...prev, encryptKey: event.target.value }))}
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[11px] text-muted-foreground">
-                    <p>保存后会直接写入 `~/.openclaw/openclaw.json` 的 `channels.feishu` 配置。</p>
-                    <p className="mt-1">
-                      如果你还没安装飞书插件，仍需额外执行 `openclaw plugins install @openclaw/feishu`。
+              <div className="rounded-2xl border border-sky-500/15 bg-sky-500/8 p-4">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                  <div className="space-y-1">
+                    <p className="text-[11px] uppercase tracking-[0.18em] text-sky-200/70">扫码绑定流程</p>
+                    <h4 className="text-[16px] font-semibold text-sky-50">打开终端后执行官方安装向导</h4>
+                    <p className="max-w-2xl text-[12px] text-sky-100/75">
+                      安装命令会拉起飞书官方插件流程。你只需要在终端里选择绑定方式，然后用飞书客户端扫码，后续配置由插件自动完成。
                     </p>
                   </div>
+                  <Button size="sm" onClick={() => void handleFeishuAction("install")} disabled={actionLoading === "install"}>
+                    {actionLoading === "install" ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
+                    开始扫码绑定
+                  </Button>
+                </div>
+                <div className="mt-3 rounded-xl border border-white/[0.06] bg-black/20 px-3 py-2 font-mono text-[11px] text-sky-100/80">
+                  npx -y @larksuite/openclaw-lark-tools install
+                </div>
+              </div>
 
-                  {formError && (
-                    <div className="rounded-lg border border-red-500/20 bg-red-500/8 px-3 py-2.5 text-[12px] text-red-300">
-                      {formError}
+              <div className="grid gap-3 md:grid-cols-2">
+                {FEISHU_ACTIONS.map((item) => (
+                  <Card key={item.intent} className="border-white/[0.08] bg-white/[0.02]">
+                    <CardContent className="space-y-3 p-4">
+                      <div className="space-y-1">
+                        <h4 className="text-[13px] font-semibold">{item.title}</h4>
+                        <p className="text-[12px] leading-5 text-muted-foreground">{item.description}</p>
+                      </div>
+                      <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 text-[11px] leading-5 text-muted-foreground">
+                        {item.hint}
+                      </div>
+                      <Button size="sm" variant="outline" onClick={() => void handleFeishuAction("install")} disabled={actionLoading === "install"}>
+                        {actionLoading === "install" ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
+                        打开终端扫码
+                      </Button>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+
+              <div className="grid gap-3 lg:grid-cols-[1.4fr_1fr]">
+                <Card className="border-white/[0.08] bg-white/[0.02]">
+                  <CardContent className="space-y-3 p-4">
+                    <h4 className="text-[13px] font-semibold">完成绑定后怎么验证</h4>
+                    <div className="space-y-2 text-[12px] leading-5 text-muted-foreground">
+                      <p>1. 在飞书里打开新绑定的机器人，先发送任意消息确认它已经在线。</p>
+                      <p>2. 如果希望 OpenClaw 以你的身份读写消息、文档、日程等，可以在飞书里发送 <code>/feishu auth</code> 完成授权。</p>
+                      <p>3. 发送 <code>/feishu start</code> 检查插件版本和运行状态；回来点页面右上角“刷新”同步频道列表。</p>
                     </div>
-                  )}
+                  </CardContent>
+                </Card>
 
-                  <div className="flex flex-wrap gap-2">
-                    <Button size="sm" onClick={() => void handleSaveFeishu()} disabled={formSaving || !canSaveFeishu}>
-                      {formSaving ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
-                      {formSaving ? "保存中..." : editingAccountId ? "保存配置" : "添加飞书"}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      asChild
-                    >
-                      <a href="https://docs.openclaw.ai/channels/feishu" target="_blank" rel="noreferrer">
-                        <ExternalLink size={14} />
-                        查看飞书文档
-                      </a>
-                    </Button>
-                  </div>
-                </>
+                <Card className="border-white/[0.08] bg-white/[0.02]">
+                  <CardContent className="space-y-3 p-4">
+                    <h4 className="text-[13px] font-semibold">常用维护命令</h4>
+                    <div className="flex flex-col gap-2">
+                      <Button size="sm" variant="outline" onClick={() => void handleFeishuAction("update")} disabled={actionLoading === "update"}>
+                        {actionLoading === "update" ? <Loader2 className="animate-spin" /> : <RefreshCw size={14} />}
+                        更新插件
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => void handleFeishuAction("doctor")} disabled={actionLoading === "doctor"}>
+                        {actionLoading === "doctor" ? <Loader2 className="animate-spin" /> : <Settings2 size={14} />}
+                        诊断问题
+                      </Button>
+                      <Button size="sm" variant="outline" asChild>
+                        <a href={FEISHU_GUIDE_URL} target="_blank" rel="noreferrer">
+                          <ExternalLink size={14} />
+                          查看对接文档
+                        </a>
+                      </Button>
+                      <Button size="sm" variant="outline" asChild>
+                        <a href={FEISHU_ARTICLE_URL} target="_blank" rel="noreferrer">
+                          <ExternalLink size={14} />
+                          官方安装说明
+                        </a>
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {actionMessage && (
+                <div
+                  className={`rounded-lg px-3 py-2.5 text-[12px] ${
+                    actionMessage.tone === "success"
+                      ? "border border-emerald-500/20 bg-emerald-500/10 text-emerald-200"
+                      : "border border-red-500/20 bg-red-500/8 text-red-300"
+                  }`}
+                >
+                  {actionMessage.text}
+                </div>
               )}
             </CardContent>
           </Card>
