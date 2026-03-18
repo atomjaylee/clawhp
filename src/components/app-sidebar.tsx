@@ -60,6 +60,7 @@ export function AppSidebar({
 
   return (
     <Sidebar variant="sidebar">
+      <div className="h-6 shrink-0 border-b border-white/[0.05] bg-sidebar/90" data-tauri-drag-region />
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>

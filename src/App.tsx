@@ -150,7 +150,8 @@ export default function App() {
           version={systemInfo?.openclaw_version ?? undefined}
         />
         <SidebarInset className="min-h-0 overflow-hidden">
-          <header className="flex h-10 shrink-0 items-center gap-2 border-b border-white/[0.06] bg-background/95 px-2.5">
+          <div className="h-6 shrink-0 border-b border-white/[0.05] bg-background/90" data-tauri-drag-region />
+          <header className="flex h-9 shrink-0 items-center gap-2 border-b border-white/[0.06] bg-background/95 px-2.5">
             <div className="flex min-w-0 items-center gap-2">
               <SidebarTrigger className="-ml-0.5 text-muted-foreground hover:text-foreground" />
               <Separator orientation="vertical" className="h-4 bg-white/[0.06]" />
