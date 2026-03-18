@@ -150,27 +150,25 @@ export default function App() {
           version={systemInfo?.openclaw_version ?? undefined}
         />
         <SidebarInset className="min-h-0 overflow-hidden">
-          <div className="h-8 shrink-0 w-full border-b border-white/[0.05] bg-background/90 backdrop-blur-sm" data-tauri-drag-region />
-          <header className="flex h-11 shrink-0 items-center justify-between border-b border-white/[0.06] bg-background/95 px-3 backdrop-blur-sm">
+          <header className="flex h-10 shrink-0 items-center gap-2 border-b border-white/[0.06] bg-background/95 px-2.5">
             <div className="flex min-w-0 items-center gap-2">
-              <SidebarTrigger className="-ml-1 text-muted-foreground hover:text-foreground" />
-              <Separator orientation="vertical" className="mr-1 h-4 bg-white/[0.06]" />
-              <Breadcrumb>
+              <SidebarTrigger className="-ml-0.5 text-muted-foreground hover:text-foreground" />
+              <Separator orientation="vertical" className="h-4 bg-white/[0.06]" />
+              <Breadcrumb className="min-w-0">
                 <BreadcrumbList>
-                  <BreadcrumbItem>
-                    <BreadcrumbPage className="truncate text-[13px] text-muted-foreground">{pageTitle}</BreadcrumbPage>
+                  <BreadcrumbItem className="min-w-0">
+                    <BreadcrumbPage className="truncate text-[12px] text-muted-foreground">{pageTitle}</BreadcrumbPage>
                   </BreadcrumbItem>
                 </BreadcrumbList>
               </Breadcrumb>
             </div>
+            <div className="h-full flex-1" data-tauri-drag-region />
             <Badge variant="outline" className="h-6 border-white/[0.08] bg-white/[0.03] px-2 text-[10px] text-muted-foreground">
               {mode === "dashboard" ? "控制台" : "安装向导"}
             </Badge>
           </header>
-          <div className="flex min-h-0 flex-1 p-3">
-            <div className="flex min-h-0 w-full flex-1 overflow-hidden rounded-xl border border-white/[0.06] bg-card/70 shadow-lg shadow-black/10">
-              {renderContent()}
-            </div>
+          <div className="flex min-h-0 flex-1 overflow-hidden">
+            {renderContent()}
           </div>
         </SidebarInset>
       </SidebarProvider>

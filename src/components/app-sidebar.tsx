@@ -59,8 +59,7 @@ export function AppSidebar({
   const currentWizardIdx = wizardNav.findIndex((s) => s.id === wizardStep);
 
   return (
-    <Sidebar variant="inset">
-      <div className="h-8 shrink-0 w-full" data-tauri-drag-region />
+    <Sidebar variant="sidebar">
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>

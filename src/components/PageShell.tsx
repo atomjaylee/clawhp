@@ -18,7 +18,7 @@ export default function PageShell({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className={cn(
-        "shrink-0 border-b border-white/[0.06] bg-background/80 px-5 py-4 backdrop-blur-sm",
+        "shrink-0 border-b border-white/[0.06] bg-background/80 px-4 py-3 backdrop-blur-sm",
         headerClassName,
       )}
       >
@@ -26,7 +26,7 @@ export default function PageShell({
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
-        <div className={cn("space-y-4 p-5 pb-5", bodyClassName)}>
+        <div className={cn("space-y-4 p-4", bodyClassName)}>
           {children}
         </div>
       </ScrollArea>
