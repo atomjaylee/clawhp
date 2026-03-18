@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import QRCode from "qrcode";
 import {
-  ExternalLink,
+  CheckCircle2,
   Loader2,
   MessageSquare,
   Plus,
@@ -17,7 +19,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import type { CommandResult } from "@/types";
+import type { CommandResult, LogEntry } from "@/types";
 
 interface ChannelEntry {
   channel: string;
@@ -33,10 +35,42 @@ interface ChannelStatus {
   message: string;
 }
 
-type FeishuTerminalAction = "install" | "update" | "doctor";
+interface FeishuPluginStatus {
+  officialPluginInstalled: boolean;
+  officialPluginEnabled: boolean;
+  communityPluginEnabled: boolean;
+  channelConfigured: boolean;
+  appId: string;
+  displayName: string;
+  domain: string;
+}
 
-const FEISHU_GUIDE_URL = "https://bytedance.larkoffice.com/docx/MFK7dDFLFoVlOGxWCv5cTXKmnMh";
-const FEISHU_ARTICLE_URL = "https://www.feishu.cn/content/article/7613711414611463386";
+interface FeishuInstallEvent {
+  level: string;
+  message: string;
+}
+
+interface FeishuAuthStartPayload {
+  verificationUrl: string;
+  deviceCode: string;
+  intervalSeconds: number;
+  expireInSeconds: number;
+  env: string;
+  domain: string;
+}
+
+interface FeishuAuthPollPayload {
+  status: "pending" | "slow_down" | "success" | "denied" | "expired" | "error";
+  suggestedDomain?: string | null;
+  tenantBrand?: string | null;
+  appId?: string | null;
+  appSecret?: string | null;
+  openId?: string | null;
+  error?: string | null;
+  errorDescription?: string | null;
+}
+
+type FeishuSetupStep = "install" | "bind" | "done";
 
 const CHANNEL_LABELS: Record<string, { label: string; color: string }> = {
   telegram: { label: "Telegram", color: "bg-sky-500/15 text-sky-400" },
@@ -55,26 +89,6 @@ const CHANNEL_LABELS: Record<string, { label: string; color: string }> = {
   mattermost: { label: "Mattermost", color: "bg-blue-600/15 text-blue-400" },
   zalo: { label: "Zalo", color: "bg-blue-500/15 text-blue-400" },
 };
-
-const FEISHU_ACTIONS: Array<{
-  intent: "existing" | "new";
-  title: string;
-  description: string;
-  hint: string;
-}> = [
-  {
-    intent: "existing",
-    title: "关联已有机器人",
-    description: "适合你已经在飞书开放平台或之前的插件流程里创建过机器人，只想重新绑定到当前 OpenClaw。",
-    hint: "打开终端后，在安装流程里选择“关联已有机器人”，再用飞书扫码完成绑定。",
-  },
-  {
-    intent: "new",
-    title: "新建机器人",
-    description: "适合从零开始接入，扫码后可在飞书里一键创建新的 OpenClaw 机器人。",
-    hint: "打开终端后，在安装流程里选择“新建机器人”，扫码后继续完成创建。",
-  },
-];
 
 function getChannelInfo(ch: string) {
   return CHANNEL_LABELS[ch] ?? { label: ch, color: "bg-white/10 text-foreground/70" };
@@ -374,6 +388,12 @@ function normalizeChannelStatuses(raw: unknown): ChannelStatus[] {
   return items;
 }
 
+function formatRemainingSeconds(value: number) {
+  const minutes = Math.floor(value / 60);
+  const seconds = value % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
 export default function ChannelsPage() {
   const [channels, setChannels] = useState<ChannelEntry[]>([]);
   const [statuses, setStatuses] = useState<ChannelStatus[]>([]);
@@ -384,8 +404,71 @@ export default function ChannelsPage() {
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
-  const [actionLoading, setActionLoading] = useState<FeishuTerminalAction | null>(null);
-  const [actionMessage, setActionMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
+  const [feishuStatus, setFeishuStatus] = useState<FeishuPluginStatus | null>(null);
+  const [setupLoading, setSetupLoading] = useState(false);
+  const [setupError, setSetupError] = useState("");
+  const [setupStep, setSetupStep] = useState<FeishuSetupStep>("install");
+
+  const [installPhase, setInstallPhase] = useState<"idle" | "running" | "done">("idle");
+  const [installProgress, setInstallProgress] = useState(0);
+  const [installSuccess, setInstallSuccess] = useState(false);
+  const [installLogs, setInstallLogs] = useState<LogEntry[]>([]);
+
+  const [authSession, setAuthSession] = useState<FeishuAuthStartPayload | null>(null);
+  const [authQrDataUrl, setAuthQrDataUrl] = useState("");
+  const [bindingPhase, setBindingPhase] = useState<"idle" | "waiting" | "finalizing" | "done">("idle");
+  const [bindingError, setBindingError] = useState("");
+  const [bindingHint, setBindingHint] = useState("");
+
+  const installProgressRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const installLogEndRef = useRef<HTMLDivElement | null>(null);
+
+  const appendInstallLog = useCallback((level: LogEntry["level"], message: string) => {
+    setInstallLogs((prev) => [...prev, { timestamp: new Date(), level, message }]);
+  }, []);
+
+  useEffect(() => {
+    installLogEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [installLogs]);
+
+  useEffect(() => () => {
+    if (installProgressRef.current) {
+      clearInterval(installProgressRef.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<FeishuInstallEvent>("feishu-plugin-log", (event) => {
+      const { level, message } = event.payload;
+
+      if (level === "done") {
+        if (installProgressRef.current) {
+          clearInterval(installProgressRef.current);
+        }
+        const ok = message === "success";
+        setInstallProgress(ok ? 100 : 0);
+        setInstallSuccess(ok);
+        setInstallPhase("done");
+        if (ok) {
+          appendInstallLog("success", "官方飞书插件安装完成");
+        } else {
+          appendInstallLog("error", "飞书插件安装失败，请检查日志");
+        }
+        return;
+      }
+
+      if (message.trim()) {
+        const logLevel = level === "error" ? "error" : level === "warn" ? "warn" : "info";
+        appendInstallLog(logLevel, message);
+      }
+
+      setInstallProgress((progress) => (progress < 92 ? progress + Math.random() * 3 : progress));
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [appendInstallLog]);
 
   const fetchChannels = useCallback(async () => {
     setLoading(true);
@@ -450,33 +533,116 @@ export default function ChannelsPage() {
     }
   }, []);
 
-  useEffect(() => {
-    void fetchChannels();
-    void fetchStatus();
-  }, [fetchChannels, fetchStatus]);
-
   const refreshAll = useCallback(async () => {
     await Promise.all([fetchChannels(), fetchStatus()]);
   }, [fetchChannels, fetchStatus]);
+
+  useEffect(() => {
+    void refreshAll();
+  }, [refreshAll]);
 
   const getStatus = useCallback((channel: string, account: string) => (
     statuses.find((entry) => entry.channel === channel && (entry.account === account || entry.account === "default"))
   ), [statuses]);
 
-  const openFeishuDialog = useCallback((accountId?: string) => {
-    setEditingAccountId(accountId ?? null);
-    setActionMessage(null);
-    setDialogOpen(true);
+  const resetFeishuDialogState = useCallback(() => {
+    setSetupError("");
+    setSetupStep("install");
+    setFeishuStatus(null);
+    setInstallPhase("idle");
+    setInstallProgress(0);
+    setInstallSuccess(false);
+    setInstallLogs([]);
+    setAuthSession(null);
+    setAuthQrDataUrl("");
+    setBindingPhase("idle");
+    setBindingError("");
+    setBindingHint("");
   }, []);
 
+  const loadFeishuSetup = useCallback(async () => {
+    setSetupLoading(true);
+    setSetupError("");
+    try {
+      const result: CommandResult = await invoke("get_feishu_plugin_status");
+      if (!result.success) {
+        setSetupError(result.stderr || "飞书插件状态读取失败");
+        return null;
+      }
+
+      const parsed = parseJsonValue<FeishuPluginStatus | null>(result.stdout, null);
+      if (!parsed) {
+        setSetupError("飞书插件状态解析失败");
+        return null;
+      }
+
+      setFeishuStatus(parsed);
+      setSetupStep(parsed.officialPluginInstalled ? (parsed.channelConfigured ? "done" : "bind") : "install");
+      return parsed;
+    } catch (e) {
+      setSetupError(`${e}`);
+      return null;
+    } finally {
+      setSetupLoading(false);
+    }
+  }, []);
+
+  const beginFeishuBinding = useCallback(async () => {
+    setBindingError("");
+    setBindingHint("");
+    setBindingPhase("idle");
+    setAuthSession(null);
+    setAuthQrDataUrl("");
+
+    try {
+      const result: CommandResult = await invoke("start_feishu_auth_session", {
+        env: "prod",
+        lane: null,
+      });
+      if (!result.success) {
+        setBindingError(result.stderr || "飞书扫码初始化失败");
+        return;
+      }
+
+      const payload = parseJsonValue<FeishuAuthStartPayload | null>(result.stdout, null);
+      if (!payload) {
+        setBindingError("飞书扫码初始化失败");
+        return;
+      }
+
+      const dataUrl = await QRCode.toDataURL(payload.verificationUrl, {
+        errorCorrectionLevel: "M",
+        margin: 1,
+        width: 280,
+      });
+
+      setAuthSession(payload);
+      setAuthQrDataUrl(dataUrl);
+      setBindingPhase("waiting");
+      setBindingHint("请用飞书扫一扫，绑定完成后当前窗口会自动继续。");
+    } catch (e) {
+      setBindingError(`${e}`);
+    }
+  }, []);
+
+  const openFeishuDialog = useCallback(async (accountId?: string) => {
+    setEditingAccountId(accountId ?? null);
+    setDialogOpen(true);
+    resetFeishuDialogState();
+    const status = await loadFeishuSetup();
+    if (status?.officialPluginInstalled && !status.channelConfigured) {
+      await beginFeishuBinding();
+    }
+  }, [beginFeishuBinding, loadFeishuSetup, resetFeishuDialogState]);
+
   const closeDialog = useCallback(() => {
-    if (actionLoading) {
+    if (installPhase === "running" || bindingPhase === "finalizing") {
       return;
     }
     setDialogOpen(false);
     setEditingAccountId(null);
-    setActionMessage(null);
-  }, [actionLoading]);
+    resetFeishuDialogState();
+  }, [bindingPhase, installPhase, resetFeishuDialogState]);
 
   const handleRemove = async (channel: string, account: string) => {
     if (!confirm(`确定移除 ${getChannelInfo(channel).label} (${account}) 吗？`)) return;
@@ -497,34 +663,162 @@ export default function ChannelsPage() {
     }
   };
 
-  const handleFeishuAction = useCallback(async (action: FeishuTerminalAction) => {
-    setActionLoading(action);
-    setActionMessage(null);
+  const handleInstallFeishu = useCallback(async () => {
+    setInstallPhase("running");
+    setInstallSuccess(false);
+    setInstallProgress(5);
+    setInstallLogs([]);
+    setBindingError("");
+    setSetupError("");
+
+    appendInstallLog("info", "正在应用内安装飞书官方插件...");
+    appendInstallLog("info", "安装完成后会直接进入扫码绑定。");
+
+    if (installProgressRef.current) {
+      clearInterval(installProgressRef.current);
+    }
+    installProgressRef.current = setInterval(() => {
+      setInstallProgress((progress) => (progress < 85 ? progress + 1 : progress));
+    }, 1500);
+
     try {
-      const result: CommandResult = await invoke("open_feishu_plugin_terminal", { action });
+      const result: CommandResult = await invoke("install_feishu_plugin");
       if (!result.success) {
-        setActionMessage({
-          tone: "error",
-          text: result.stderr || "飞书插件命令启动失败",
-        });
+        setSetupError(result.stderr || "飞书官方插件安装失败");
         return;
       }
-      const suffix = action === "install"
-        ? "完成扫码和终端向导后，回到这里点“刷新”即可看到新的频道。"
-        : "命令已经在外部终端启动，可以在终端里继续完成操作。";
-      setActionMessage({
-        tone: "success",
-        text: `${result.stdout}。${suffix}`,
-      });
+
+      const latestStatus = await loadFeishuSetup();
+      if (latestStatus?.officialPluginInstalled) {
+        setSetupStep("bind");
+        await beginFeishuBinding();
+      }
     } catch (e) {
-      setActionMessage({
-        tone: "error",
-        text: `${e}`,
-      });
-    } finally {
-      setActionLoading(null);
+      if (installProgressRef.current) {
+        clearInterval(installProgressRef.current);
+      }
+      setInstallPhase("done");
+      setInstallProgress(0);
+      setInstallSuccess(false);
+      setSetupError(`${e}`);
+      appendInstallLog("error", `${e}`);
     }
-  }, []);
+  }, [appendInstallLog, beginFeishuBinding, loadFeishuSetup]);
+
+  useEffect(() => {
+    if (bindingPhase !== "waiting" || !authSession) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleNext = (seconds: number) => {
+      timer = setTimeout(() => {
+        void poll();
+      }, seconds * 1000);
+    };
+
+    const poll = async () => {
+      if (cancelled) {
+        return;
+      }
+
+      try {
+        const result: CommandResult = await invoke("poll_feishu_auth_session", {
+          deviceCode: authSession.deviceCode,
+          env: authSession.env,
+          lane: null,
+          domain: authSession.domain,
+        });
+
+        if (!result.success) {
+          setBindingPhase("idle");
+          setBindingError(result.stderr || "飞书扫码状态获取失败");
+          return;
+        }
+
+        const payload = parseJsonValue<FeishuAuthPollPayload | null>(result.stdout, null);
+        if (!payload) {
+          setBindingPhase("idle");
+          setBindingError("飞书扫码状态解析失败");
+          return;
+        }
+
+        if (payload.suggestedDomain && payload.suggestedDomain !== authSession.domain) {
+          setAuthSession((prev) => prev ? { ...prev, domain: payload.suggestedDomain ?? prev.domain } : prev);
+          setBindingHint(payload.suggestedDomain === "lark" ? "已切换到 Lark 域继续等待扫码结果..." : "继续等待扫码结果...");
+          scheduleNext(1);
+          return;
+        }
+
+        if (payload.status === "success" && payload.appId && payload.appSecret) {
+          setBindingPhase("finalizing");
+          setBindingHint("扫码成功，正在写入配置并刷新飞书频道...");
+
+          const bindingResult: CommandResult = await invoke("complete_feishu_plugin_binding", {
+            appId: payload.appId,
+            appSecret: payload.appSecret,
+            domain: payload.suggestedDomain ?? authSession.domain,
+            openId: payload.openId ?? null,
+          });
+
+          if (!bindingResult.success) {
+            setBindingPhase("idle");
+            setBindingError(bindingResult.stderr || "飞书绑定失败");
+            return;
+          }
+
+          const latestStatus = await loadFeishuSetup();
+          setFeishuStatus(latestStatus ?? feishuStatus);
+          setSetupStep("done");
+          setBindingPhase("done");
+          setBindingError("");
+          setBindingHint(bindingResult.stderr
+            ? `飞书已绑定完成，但网关重启返回提醒：${bindingResult.stderr}`
+            : "飞书已绑定完成，可以回到频道列表继续使用。");
+          await refreshAll();
+          return;
+        }
+
+        if (payload.status === "pending") {
+          scheduleNext(authSession.intervalSeconds);
+          return;
+        }
+
+        if (payload.status === "slow_down") {
+          setBindingHint("飞书正在处理授权，请稍等片刻...");
+          scheduleNext(authSession.intervalSeconds + 5);
+          return;
+        }
+
+        setBindingPhase("idle");
+        if (payload.status === "denied") {
+          setBindingError("你在飞书里取消了授权，请重新扫码。");
+        } else if (payload.status === "expired") {
+          setBindingError("扫码已过期，请重新生成二维码。");
+        } else {
+          setBindingError(payload.errorDescription || payload.error || "飞书扫码失败，请重试。");
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setBindingPhase("idle");
+          setBindingError(`${e}`);
+        }
+      }
+    };
+
+    void poll();
+
+    return () => {
+      cancelled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [authSession, bindingPhase, feishuStatus, loadFeishuSetup, refreshAll]);
+
+  const showInstallLogs = installPhase === "running" || installLogs.length > 0;
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -551,8 +845,8 @@ export default function ChannelsPage() {
                 </TooltipTrigger>
                 <TooltipContent>刷新</TooltipContent>
               </Tooltip>
-              <Button size="sm" variant="outline" onClick={() => openFeishuDialog()}>
-                <Plus size={14} /> 接入飞书
+              <Button size="sm" variant="outline" onClick={() => void openFeishuDialog()}>
+                <Plus size={14} /> 添加飞书
               </Button>
             </div>
           </div>
@@ -576,16 +870,11 @@ export default function ChannelsPage() {
                 </div>
                 <h3 className="mb-1 text-[14px] font-semibold">先接入一个飞书频道</h3>
                 <p className="mx-auto mb-4 max-w-sm text-[12px] text-muted-foreground">
-                  频道页已经切到飞书官方插件流程，不再手动填写 App ID / App Secret，支持扫码绑定已有机器人或新建机器人。
+                  点击“添加飞书”后会直接在应用内检测官方插件、安装插件并展示扫码绑定，不再跳出命令行窗口。
                 </p>
                 <div className="flex justify-center gap-2">
-                  <Button size="sm" onClick={() => openFeishuDialog()}>
-                    <Plus size={14} /> 开始扫码绑定
-                  </Button>
-                  <Button size="sm" variant="outline" asChild>
-                    <a href={FEISHU_GUIDE_URL} target="_blank" rel="noreferrer">
-                      <ExternalLink size={14} /> 查看对接文档
-                    </a>
+                  <Button size="sm" onClick={() => void openFeishuDialog()}>
+                    <Plus size={14} /> 添加飞书
                   </Button>
                 </div>
               </CardContent>
@@ -639,12 +928,12 @@ export default function ChannelsPage() {
                                   variant="ghost"
                                   size="icon"
                                   className="h-7 w-7 text-muted-foreground opacity-0 transition-opacity hover:text-sky-300 group-hover:opacity-100"
-                                  onClick={() => openFeishuDialog(channel.account)}
+                                  onClick={() => void openFeishuDialog(channel.account)}
                                 >
                                   <Settings2 size={13} />
                                 </Button>
                               </TooltipTrigger>
-                              <TooltipContent>扫码新增或管理飞书插件</TooltipContent>
+                              <TooltipContent>管理飞书官方插件</TooltipContent>
                             </Tooltip>
                           )}
                           <Tooltip>
@@ -683,108 +972,222 @@ export default function ChannelsPage() {
                       <MessageSquare size={15} className="text-blue-400" />
                     </div>
                     <div>
-                      <h3 className="text-[13px] font-semibold">{editingAccountId ? "管理飞书接入" : "接入飞书官方插件"}</h3>
+                      <h3 className="text-[13px] font-semibold">{editingAccountId ? "管理飞书接入" : "添加飞书"}</h3>
                       <p className="text-[11px] text-muted-foreground">
-                        通过官方插件安装命令完成扫码绑定；终端里可选择关联已有机器人，也可新建机器人。
+                        直接在应用内完成官方插件安装和扫码绑定，不再外跳终端。
                       </p>
                     </div>
                   </div>
                 </div>
-                <Button size="sm" variant="ghost" onClick={closeDialog} disabled={Boolean(actionLoading)}>
+                <Button size="sm" variant="ghost" onClick={closeDialog} disabled={installPhase === "running" || bindingPhase === "finalizing"}>
                   关闭
                 </Button>
               </div>
 
-              <div className="rounded-2xl border border-sky-500/15 bg-sky-500/8 p-4">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-                  <div className="space-y-1">
-                    <p className="text-[11px] uppercase tracking-[0.18em] text-sky-200/70">扫码绑定流程</p>
-                    <h4 className="text-[16px] font-semibold text-sky-50">打开终端后执行官方安装向导</h4>
-                    <p className="max-w-2xl text-[12px] text-sky-100/75">
-                      安装命令会拉起飞书官方插件流程。你只需要在终端里选择绑定方式，然后用飞书客户端扫码，后续配置由插件自动完成。
-                    </p>
+              {setupLoading ? (
+                <div className="flex items-center justify-center py-16 text-muted-foreground">
+                  <Loader2 size={18} className="mr-2 animate-spin" />
+                  <span className="text-[13px]">正在检查飞书插件状态...</span>
+                </div>
+              ) : (
+                <>
+                  {(setupError || bindingError) && (
+                    <div className="rounded-lg border border-red-500/20 bg-red-500/8 px-3 py-2.5 text-[12px] text-red-300">
+                      {setupError || bindingError}
+                    </div>
+                  )}
+
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <Card className={`border-white/[0.08] ${setupStep === "install" ? "bg-sky-500/10" : "bg-white/[0.02]"}`}>
+                      <CardContent className="space-y-2 p-4">
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 1 步</p>
+                        <h4 className="text-[13px] font-semibold">安装官方插件</h4>
+                        <p className="text-[12px] leading-5 text-muted-foreground">
+                          自动检测本机是否已安装飞书官方插件，缺失时直接在应用内完成安装。
+                        </p>
+                      </CardContent>
+                    </Card>
+                    <Card className={`border-white/[0.08] ${setupStep === "bind" ? "bg-sky-500/10" : "bg-white/[0.02]"}`}>
+                      <CardContent className="space-y-2 p-4">
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 2 步</p>
+                        <h4 className="text-[13px] font-semibold">扫码绑定</h4>
+                        <p className="text-[12px] leading-5 text-muted-foreground">
+                          在当前窗口展示二维码，用飞书扫一扫后自动轮询授权结果。
+                        </p>
+                      </CardContent>
+                    </Card>
+                    <Card className={`border-white/[0.08] ${setupStep === "done" ? "bg-emerald-500/10" : "bg-white/[0.02]"}`}>
+                      <CardContent className="space-y-2 p-4">
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 3 步</p>
+                        <h4 className="text-[13px] font-semibold">写入配置并生效</h4>
+                        <p className="text-[12px] leading-5 text-muted-foreground">
+                          扫码成功后自动写入 `channels.feishu`，并刷新频道列表。
+                        </p>
+                      </CardContent>
+                    </Card>
                   </div>
-                  <Button size="sm" onClick={() => void handleFeishuAction("install")} disabled={actionLoading === "install"}>
-                    {actionLoading === "install" ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
-                    开始扫码绑定
-                  </Button>
-                </div>
-                <div className="mt-3 rounded-xl border border-white/[0.06] bg-black/20 px-3 py-2 font-mono text-[11px] text-sky-100/80">
-                  npx -y @larksuite/openclaw-lark-tools install
-                </div>
-              </div>
 
-              <div className="grid gap-3 md:grid-cols-2">
-                {FEISHU_ACTIONS.map((item) => (
-                  <Card key={item.intent} className="border-white/[0.08] bg-white/[0.02]">
-                    <CardContent className="space-y-3 p-4">
-                      <div className="space-y-1">
-                        <h4 className="text-[13px] font-semibold">{item.title}</h4>
-                        <p className="text-[12px] leading-5 text-muted-foreground">{item.description}</p>
-                      </div>
-                      <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 text-[11px] leading-5 text-muted-foreground">
-                        {item.hint}
-                      </div>
-                      <Button size="sm" variant="outline" onClick={() => void handleFeishuAction("install")} disabled={actionLoading === "install"}>
-                        {actionLoading === "install" ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
-                        打开终端扫码
-                      </Button>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
+                  {setupStep === "install" && (
+                    <Card className="border-white/[0.08] bg-white/[0.02]">
+                      <CardContent className="space-y-4 p-4">
+                        <div className="space-y-1">
+                          <h4 className="text-[14px] font-semibold">先安装飞书官方插件</h4>
+                          <p className="text-[12px] text-muted-foreground">
+                            检测到当前环境还没有官方飞书插件。点一下按钮，应用会自动完成安装，装好后直接进入扫码绑定。
+                          </p>
+                        </div>
 
-              <div className="grid gap-3 lg:grid-cols-[1.4fr_1fr]">
-                <Card className="border-white/[0.08] bg-white/[0.02]">
-                  <CardContent className="space-y-3 p-4">
-                    <h4 className="text-[13px] font-semibold">完成绑定后怎么验证</h4>
-                    <div className="space-y-2 text-[12px] leading-5 text-muted-foreground">
-                      <p>1. 在飞书里打开新绑定的机器人，先发送任意消息确认它已经在线。</p>
-                      <p>2. 如果希望 OpenClaw 以你的身份读写消息、文档、日程等，可以在飞书里发送 <code>/feishu auth</code> 完成授权。</p>
-                      <p>3. 发送 <code>/feishu start</code> 检查插件版本和运行状态；回来点页面右上角“刷新”同步频道列表。</p>
+                        {showInstallLogs && (
+                          <div className="space-y-3">
+                            <div>
+                              <div className="mb-1 flex items-center justify-between text-[12px] text-muted-foreground">
+                                <span>{installPhase === "running" ? "正在安装..." : installSuccess ? "安装完成" : "安装日志"}</span>
+                                <span>{Math.round(installProgress)}%</span>
+                              </div>
+                              <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
+                                <div className="h-full rounded-full bg-sky-400 transition-all" style={{ width: `${installProgress}%` }} />
+                              </div>
+                            </div>
+
+                            <Card className="border-white/[0.06] bg-[#060b11]">
+                              <CardContent className="p-0">
+                                <ScrollArea className="h-52">
+                                  <div className="space-y-1 p-3 font-mono text-[11px]">
+                                    {installLogs.map((log, index) => (
+                                      <div key={`${log.timestamp.getTime()}-${index}`} className="flex gap-2 leading-5">
+                                        <span className="w-[60px] shrink-0 text-muted-foreground/40">{log.timestamp.toLocaleTimeString()}</span>
+                                        <span className={
+                                          log.level === "error" ? "text-red-400"
+                                            : log.level === "success" ? "text-emerald-400"
+                                            : log.level === "warn" ? "text-amber-400"
+                                            : "text-foreground/70"
+                                        }
+                                        >
+                                          {log.message}
+                                        </span>
+                                      </div>
+                                    ))}
+                                    <div ref={installLogEndRef} />
+                                  </div>
+                                </ScrollArea>
+                              </CardContent>
+                            </Card>
+                          </div>
+                        )}
+
+                        <div className="flex flex-wrap gap-2">
+                          <Button size="sm" onClick={() => void handleInstallFeishu()} disabled={installPhase === "running"}>
+                            {installPhase === "running" ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
+                            {installPhase === "running" ? "安装中..." : "一键安装并继续"}
+                          </Button>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {(setupStep === "bind" || setupStep === "done") && (
+                    <div className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
+                      <Card className="border-white/[0.08] bg-white/[0.02]">
+                        <CardContent className="space-y-4 p-4">
+                          <div className="space-y-1">
+                            <h4 className="text-[14px] font-semibold">
+                              {setupStep === "done" ? "飞书已接入" : "扫码绑定飞书"}
+                            </h4>
+                            <p className="text-[12px] text-muted-foreground">
+                              {setupStep === "done"
+                                ? "官方飞书插件已经可用。如果你想更换绑定，可以重新生成二维码再扫一次。"
+                                : "二维码会在当前窗口内展示，扫码成功后会自动写入配置。"}
+                            </p>
+                          </div>
+
+                          {feishuStatus?.channelConfigured && setupStep === "done" && (
+                            <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/8 p-3">
+                              <div className="flex items-start gap-2">
+                                <CheckCircle2 size={16} className="mt-0.5 text-emerald-300" />
+                                <div className="text-[12px] text-emerald-100/90">
+                                  <p>当前已绑定 {feishuStatus.displayName || "飞书官方插件"}。</p>
+                                  <p className="mt-1 text-emerald-100/70">App ID: {feishuStatus.appId || "已写入配置"}，环境: {feishuStatus.domain === "lark" ? "Lark" : "飞书"}</p>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {bindingPhase === "waiting" && authQrDataUrl ? (
+                            <div className="space-y-3">
+                              <div className="rounded-2xl border border-sky-500/15 bg-sky-500/8 p-5 text-center">
+                                <img src={authQrDataUrl} alt="飞书扫码二维码" className="mx-auto h-56 w-56 rounded-xl bg-white p-3" />
+                                <p className="mt-3 text-[13px] font-medium text-sky-50">请用飞书扫一扫</p>
+                                <p className="mt-1 text-[12px] text-sky-100/75">{bindingHint}</p>
+                              </div>
+                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
+                                <p>二维码有效期约 {authSession ? formatRemainingSeconds(authSession.expireInSeconds) : "--"}，授权完成后这里会自动继续。</p>
+                                <p className="mt-1">如果你扫码后没有变化，可以等待几秒，或者重新生成二维码。</p>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-4 text-[12px] text-muted-foreground">
+                              <p>{bindingHint || "准备好后点击下方按钮生成二维码。"}</p>
+                            </div>
+                          )}
+
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              size="sm"
+                              onClick={() => void beginFeishuBinding()}
+                              disabled={bindingPhase === "waiting" || bindingPhase === "finalizing"}
+                            >
+                              {bindingPhase === "finalizing" ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
+                              {bindingPhase === "waiting" ? "等待扫码中..." : bindingPhase === "finalizing" ? "写入配置中..." : feishuStatus?.channelConfigured ? "重新扫码绑定" : "开始扫码绑定"}
+                            </Button>
+                            <Button size="sm" variant="outline" onClick={() => void refreshAll()} disabled={bindingPhase === "finalizing"}>
+                              <RefreshCw size={14} />
+                              刷新频道列表
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+
+                      <Card className="border-white/[0.08] bg-white/[0.02]">
+                        <CardContent className="space-y-4 p-4">
+                          <div className="space-y-1">
+                            <h4 className="text-[13px] font-semibold">当前状态</h4>
+                            <p className="text-[12px] text-muted-foreground">这里会根据插件检测、安装和扫码结果实时更新。</p>
+                          </div>
+
+                          <div className="space-y-3 text-[12px]">
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">官方插件</p>
+                              <p className="mt-1 font-medium text-foreground">{feishuStatus?.officialPluginInstalled ? "已安装" : "未安装"}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">官方插件状态</p>
+                              <p className="mt-1 font-medium text-foreground">{feishuStatus?.officialPluginEnabled ? "已启用" : "待启用"}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">扫码绑定</p>
+                              <p className="mt-1 font-medium text-foreground">
+                                {bindingPhase === "done"
+                                  ? "已完成"
+                                  : bindingPhase === "finalizing"
+                                    ? "写入配置中"
+                                    : bindingPhase === "waiting"
+                                      ? "等待扫码"
+                                      : feishuStatus?.channelConfigured
+                                        ? "已配置，可重新扫码"
+                                        : "尚未开始"}
+                              </p>
+                            </div>
+                            {feishuStatus?.communityPluginEnabled && (
+                              <div className="rounded-xl border border-amber-500/15 bg-amber-500/8 p-3 text-amber-100/85">
+                                检测到旧的社区飞书插件仍配置为启用状态。应用内绑定会自动优先启用官方插件。
+                              </div>
+                            )}
+                          </div>
+                        </CardContent>
+                      </Card>
                     </div>
-                  </CardContent>
-                </Card>
-
-                <Card className="border-white/[0.08] bg-white/[0.02]">
-                  <CardContent className="space-y-3 p-4">
-                    <h4 className="text-[13px] font-semibold">常用维护命令</h4>
-                    <div className="flex flex-col gap-2">
-                      <Button size="sm" variant="outline" onClick={() => void handleFeishuAction("update")} disabled={actionLoading === "update"}>
-                        {actionLoading === "update" ? <Loader2 className="animate-spin" /> : <RefreshCw size={14} />}
-                        更新插件
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => void handleFeishuAction("doctor")} disabled={actionLoading === "doctor"}>
-                        {actionLoading === "doctor" ? <Loader2 className="animate-spin" /> : <Settings2 size={14} />}
-                        诊断问题
-                      </Button>
-                      <Button size="sm" variant="outline" asChild>
-                        <a href={FEISHU_GUIDE_URL} target="_blank" rel="noreferrer">
-                          <ExternalLink size={14} />
-                          查看对接文档
-                        </a>
-                      </Button>
-                      <Button size="sm" variant="outline" asChild>
-                        <a href={FEISHU_ARTICLE_URL} target="_blank" rel="noreferrer">
-                          <ExternalLink size={14} />
-                          官方安装说明
-                        </a>
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-
-              {actionMessage && (
-                <div
-                  className={`rounded-lg px-3 py-2.5 text-[12px] ${
-                    actionMessage.tone === "success"
-                      ? "border border-emerald-500/20 bg-emerald-500/10 text-emerald-200"
-                      : "border border-red-500/20 bg-red-500/8 text-red-300"
-                  }`}
-                >
-                  {actionMessage.text}
-                </div>
+                  )}
+                </>
               )}
             </CardContent>
           </Card>

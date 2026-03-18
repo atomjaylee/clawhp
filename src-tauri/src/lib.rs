@@ -1,3 +1,4 @@
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -5289,6 +5290,672 @@ fn open_feishu_plugin_terminal(action: Option<String>) -> CommandResult {
     }
 }
 
+const FEISHU_PLUGIN_EVENT: &str = "feishu-plugin-log";
+const FEISHU_OFFICIAL_PLUGIN_ID: &str = "openclaw-lark";
+const FEISHU_OFFICIAL_PLUGIN_PACKAGE: &str = "@larksuite/openclaw-lark";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeishuPluginStatusPayload {
+    official_plugin_installed: bool,
+    official_plugin_enabled: bool,
+    community_plugin_enabled: bool,
+    channel_configured: bool,
+    app_id: String,
+    display_name: String,
+    domain: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeishuAuthStartPayload {
+    verification_url: String,
+    device_code: String,
+    interval_seconds: u64,
+    expire_in_seconds: u64,
+    env: String,
+    domain: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeishuAuthPollPayload {
+    status: String,
+    suggested_domain: Option<String>,
+    tenant_brand: Option<String>,
+    app_id: Option<String>,
+    app_secret: Option<String>,
+    open_id: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+fn normalize_feishu_env(value: Option<&str>) -> &'static str {
+    match value.unwrap_or("prod").trim().to_ascii_lowercase().as_str() {
+        "boe" => "boe",
+        "pre" => "pre",
+        _ => "prod",
+    }
+}
+
+fn normalize_feishu_domain(value: Option<&str>) -> &'static str {
+    match value
+        .unwrap_or("feishu")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "lark" => "lark",
+        _ => "feishu",
+    }
+}
+
+fn feishu_accounts_base_url(domain: &str, env: &str) -> &'static str {
+    match (domain, env) {
+        ("lark", "boe") => "https://accounts.larksuite-boe.com",
+        ("lark", "pre") => "https://accounts.larksuite-pre.com",
+        ("lark", _) => "https://accounts.larksuite.com",
+        ("feishu", "boe") => "https://accounts.feishu-boe.cn",
+        ("feishu", "pre") => "https://accounts.feishu-pre.cn",
+        _ => "https://accounts.feishu.cn",
+    }
+}
+
+fn feishu_official_plugin_dir() -> PathBuf {
+    PathBuf::from(get_openclaw_home())
+        .join("extensions")
+        .join(FEISHU_OFFICIAL_PLUGIN_ID)
+}
+
+fn feishu_legacy_plugin_dir() -> PathBuf {
+    PathBuf::from(get_openclaw_home())
+        .join("extensions")
+        .join("feishu")
+}
+
+fn ensure_string_array_contains(value: &mut serde_json::Value, item: &str) {
+    if !value.is_array() {
+        *value = serde_json::json!([]);
+    }
+
+    if let Some(items) = value.as_array_mut() {
+        if !items.iter().any(|entry| entry.as_str() == Some(item)) {
+            items.push(serde_json::json!(item));
+        }
+    }
+}
+
+fn ensure_feishu_plugin_entries(config: &mut serde_json::Value) {
+    if config.get("plugins").is_none() || !config["plugins"].is_object() {
+        config["plugins"] = serde_json::json!({});
+    }
+    if config.pointer("/plugins/entries").is_none() || !config["plugins"]["entries"].is_object() {
+        config["plugins"]["entries"] = serde_json::json!({});
+    }
+    if config.pointer("/plugins/allow").is_none() {
+        config["plugins"]["allow"] = serde_json::json!([]);
+    }
+
+    ensure_string_array_contains(&mut config["plugins"]["allow"], FEISHU_OFFICIAL_PLUGIN_ID);
+    config["plugins"]["entries"][FEISHU_OFFICIAL_PLUGIN_ID]["enabled"] = serde_json::json!(true);
+    config["plugins"]["entries"]["feishu"]["enabled"] = serde_json::json!(false);
+}
+
+fn read_feishu_root_config(config: &serde_json::Value) -> (String, String, String, String, bool) {
+    let feishu = config
+        .pointer("/channels/feishu")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let accounts = feishu
+        .get("accounts")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let fallback_account_id = feishu
+        .get("defaultAccount")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_string())
+        .or_else(|| accounts.keys().next().cloned())
+        .unwrap_or_else(|| "default".to_string());
+
+    let account = accounts
+        .get(&fallback_account_id)
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let app_id = feishu
+        .get("appId")
+        .and_then(|value| value.as_str())
+        .or_else(|| account.get("appId").and_then(|value| value.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let app_secret = feishu
+        .get("appSecret")
+        .and_then(|value| value.as_str())
+        .or_else(|| account.get("appSecret").and_then(|value| value.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let display_name = feishu
+        .get("name")
+        .and_then(|value| value.as_str())
+        .or_else(|| feishu.get("botName").and_then(|value| value.as_str()))
+        .or_else(|| account.get("name").and_then(|value| value.as_str()))
+        .or_else(|| account.get("botName").and_then(|value| value.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let domain = feishu
+        .get("domain")
+        .and_then(|value| value.as_str())
+        .or_else(|| account.get("domain").and_then(|value| value.as_str()))
+        .unwrap_or("feishu")
+        .to_string();
+    let channel_configured = !app_id.trim().is_empty() && !app_secret.trim().is_empty();
+
+    (app_id, app_secret, display_name, domain, channel_configured)
+}
+
+async fn post_feishu_registration(
+    domain: &str,
+    env: &str,
+    lane: Option<&str>,
+    params: &[(&str, &str)],
+) -> Result<serde_json::Value, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("创建飞书授权请求失败: {}", error))?;
+
+    let mut request = client
+        .post(format!(
+            "{}/oauth/v1/app/registration",
+            feishu_accounts_base_url(domain, env)
+        ))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&params);
+
+    if let Some(lane_value) = lane.map(str::trim).filter(|value| !value.is_empty()) {
+        request = request.header("x-tt-env", lane_value);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("飞书授权请求失败: {}", error))?;
+    let text = response
+        .text()
+        .await
+        .map_err(|error| format!("读取飞书授权响应失败: {}", error))?;
+
+    serde_json::from_str(&text)
+        .map_err(|error| format!("解析飞书授权响应失败: {} ({})", error, text))
+}
+
+#[tauri::command]
+fn get_feishu_plugin_status() -> CommandResult {
+    let config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    let (app_id, _, display_name, domain, channel_configured) = read_feishu_root_config(&config);
+    let payload = FeishuPluginStatusPayload {
+        official_plugin_installed: feishu_official_plugin_dir().exists(),
+        official_plugin_enabled: config
+            .pointer("/plugins/entries/openclaw-lark/enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        community_plugin_enabled: config
+            .pointer("/plugins/entries/feishu/enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        channel_configured,
+        app_id,
+        display_name,
+        domain,
+    };
+
+    CommandResult {
+        success: true,
+        stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+async fn install_feishu_plugin(app: AppHandle) -> CommandResult {
+    tokio::task::spawn_blocking(move || {
+        emit_install_event(&app, FEISHU_PLUGIN_EVENT, "info", "正在准备飞书官方插件...");
+
+        if feishu_official_plugin_dir().exists() {
+            emit_install_event(
+                &app,
+                FEISHU_PLUGIN_EVENT,
+                "info",
+                "检测到飞书官方插件已安装，跳过安装步骤。",
+            );
+        } else {
+            match remove_path_if_exists(&feishu_legacy_plugin_dir()) {
+                Ok(true) => emit_install_event(
+                    &app,
+                    FEISHU_PLUGIN_EVENT,
+                    "info",
+                    "已清理旧的本地飞书插件目录。",
+                ),
+                Ok(false) => {}
+                Err(error) => {
+                    emit_install_event(
+                        &app,
+                        FEISHU_PLUGIN_EVENT,
+                        "warn",
+                        format!("清理旧飞书插件目录失败，继续安装: {}", error),
+                    );
+                }
+            }
+
+            emit_install_event(
+                &app,
+                FEISHU_PLUGIN_EVENT,
+                "info",
+                format!(
+                    "执行安装: openclaw plugins install {}",
+                    FEISHU_OFFICIAL_PLUGIN_PACKAGE
+                ),
+            );
+
+            let program = get_openclaw_program();
+            let install_args = vec![
+                "plugins".to_string(),
+                "install".to_string(),
+                FEISHU_OFFICIAL_PLUGIN_PACKAGE.to_string(),
+            ];
+            let install_result = stream_command_to_event(
+                &app,
+                FEISHU_PLUGIN_EVENT,
+                &program,
+                &install_args,
+                &[],
+                None,
+            );
+
+            if !install_result.success {
+                emit_install_event(&app, FEISHU_PLUGIN_EVENT, "done", "error");
+                return install_result;
+            }
+        }
+
+        let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+        ensure_feishu_plugin_entries(&mut config);
+
+        if let Err(error) = write_openclaw_config(&config) {
+            emit_install_event(
+                &app,
+                FEISHU_PLUGIN_EVENT,
+                "error",
+                format!("写入飞书插件启用状态失败: {}", error),
+            );
+            emit_install_event(&app, FEISHU_PLUGIN_EVENT, "done", "error");
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            };
+        }
+
+        emit_install_event(
+            &app,
+            FEISHU_PLUGIN_EVENT,
+            "info",
+            "飞书官方插件安装完成，下一步请在应用内扫码绑定。",
+        );
+        emit_install_event(&app, FEISHU_PLUGIN_EVENT, "done", "success");
+
+        CommandResult {
+            success: true,
+            stdout: "飞书官方插件安装完成".to_string(),
+            stderr: String::new(),
+            code: Some(0),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| CommandResult {
+        success: false,
+        stdout: String::new(),
+        stderr: format!("Task panic: {}", error),
+        code: None,
+    })
+}
+
+#[tauri::command]
+async fn start_feishu_auth_session(env: Option<String>, lane: Option<String>) -> CommandResult {
+    let env = normalize_feishu_env(env.as_deref()).to_string();
+
+    let init_response = match post_feishu_registration(
+        "feishu",
+        &env,
+        lane.as_deref(),
+        &[("action", "init")],
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            };
+        }
+    };
+
+    let supports_client_secret = init_response
+        .pointer("/supported_auth_methods")
+        .and_then(|value| value.as_array())
+        .map(|methods| {
+            methods
+                .iter()
+                .any(|entry| entry.as_str() == Some("client_secret"))
+        })
+        .unwrap_or(true);
+
+    if !supports_client_secret {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "当前环境暂不支持 client_secret 授权，请升级飞书插件工具".to_string(),
+            code: Some(1),
+        };
+    }
+
+    let begin_response = match post_feishu_registration(
+        "feishu",
+        &env,
+        lane.as_deref(),
+        &[
+            ("action", "begin"),
+            ("archetype", "PersonalAgent"),
+            ("auth_method", "client_secret"),
+            ("request_user_info", "open_id"),
+        ],
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            };
+        }
+    };
+
+    let Some(verification_url) = begin_response
+        .get("verification_uri_complete")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "未拿到飞书扫码链接，请稍后重试".to_string(),
+            code: Some(1),
+        };
+    };
+
+    let Some(device_code) = begin_response
+        .get("device_code")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "未拿到飞书设备码，请稍后重试".to_string(),
+            code: Some(1),
+        };
+    };
+
+    let payload = FeishuAuthStartPayload {
+        verification_url: verification_url.to_string(),
+        device_code: device_code.to_string(),
+        interval_seconds: begin_response
+            .get("interval")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(5),
+        expire_in_seconds: begin_response
+            .get("expire_in")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(600),
+        env,
+        domain: "feishu".to_string(),
+    };
+
+    CommandResult {
+        success: true,
+        stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+async fn poll_feishu_auth_session(
+    device_code: String,
+    env: Option<String>,
+    lane: Option<String>,
+    domain: Option<String>,
+) -> CommandResult {
+    let env = normalize_feishu_env(env.as_deref()).to_string();
+    let domain = normalize_feishu_domain(domain.as_deref()).to_string();
+    let response = match post_feishu_registration(
+        &domain,
+        &env,
+        lane.as_deref(),
+        &[("action", "poll"), ("device_code", device_code.trim())],
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            };
+        }
+    };
+
+    let tenant_brand = response
+        .pointer("/user_info/tenant_brand")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    let suggested_domain = if tenant_brand.as_deref() == Some("lark") && domain != "lark" {
+        Some("lark".to_string())
+    } else {
+        None
+    };
+
+    let payload = if let (Some(app_id), Some(app_secret)) = (
+        response
+            .get("client_id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty()),
+        response
+            .get("client_secret")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty()),
+    ) {
+        FeishuAuthPollPayload {
+            status: "success".to_string(),
+            suggested_domain: Some(suggested_domain.clone().unwrap_or_else(|| domain.clone())),
+            tenant_brand,
+            app_id: Some(app_id.to_string()),
+            app_secret: Some(app_secret.to_string()),
+            open_id: response
+                .pointer("/user_info/open_id")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string()),
+            error: None,
+            error_description: None,
+        }
+    } else {
+        let error = response
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let status = match error {
+            "authorization_pending" => "pending",
+            "slow_down" => "slow_down",
+            "access_denied" => "denied",
+            "expired_token" => "expired",
+            _ if error.is_empty() => "pending",
+            _ => "error",
+        };
+
+        FeishuAuthPollPayload {
+            status: status.to_string(),
+            suggested_domain,
+            tenant_brand,
+            app_id: None,
+            app_secret: None,
+            open_id: None,
+            error: if error.is_empty() {
+                None
+            } else {
+                Some(error.to_string())
+            },
+            error_description: response
+                .get("error_description")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string()),
+        }
+    };
+
+    CommandResult {
+        success: true,
+        stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+fn complete_feishu_plugin_binding(
+    app_id: String,
+    app_secret: String,
+    domain: Option<String>,
+    open_id: Option<String>,
+) -> CommandResult {
+    let app_id = app_id.trim();
+    let app_secret = app_secret.trim();
+    let domain = normalize_feishu_domain(domain.as_deref()).to_string();
+    let open_id = open_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
+    if app_id.is_empty() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "飞书 App ID 不能为空".to_string(),
+            code: Some(1),
+        };
+    }
+    if app_secret.is_empty() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "飞书 App Secret 不能为空".to_string(),
+            code: Some(1),
+        };
+    }
+
+    let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    if config.get("channels").is_none() || !config["channels"].is_object() {
+        config["channels"] = serde_json::json!({});
+    }
+    if config.pointer("/channels/feishu").is_none() || !config["channels"]["feishu"].is_object() {
+        config["channels"]["feishu"] = serde_json::json!({});
+    }
+
+    if let Some(feishu) = config
+        .pointer_mut("/channels/feishu")
+        .and_then(|value| value.as_object_mut())
+    {
+        feishu.remove("accounts");
+        feishu.remove("defaultAccount");
+        feishu.remove("verificationToken");
+        feishu.remove("encryptKey");
+    }
+
+    config["channels"]["feishu"]["enabled"] = serde_json::json!(true);
+    config["channels"]["feishu"]["appId"] = serde_json::json!(app_id);
+    config["channels"]["feishu"]["appSecret"] = serde_json::json!(app_secret);
+    config["channels"]["feishu"]["domain"] = serde_json::json!(domain);
+    config["channels"]["feishu"]["connectionMode"] = serde_json::json!("websocket");
+    config["channels"]["feishu"]["requireMention"] = serde_json::json!(true);
+
+    if let Some(open_id_value) = open_id.clone() {
+        config["channels"]["feishu"]["dmPolicy"] = serde_json::json!("allowlist");
+        if config.pointer("/channels/feishu/groupPolicy").is_none() {
+            config["channels"]["feishu"]["groupPolicy"] = serde_json::json!("allowlist");
+        }
+        if config.pointer("/channels/feishu/groups").is_none() {
+            config["channels"]["feishu"]["groups"] = serde_json::json!({
+                "*": { "enabled": true }
+            });
+        }
+        ensure_string_array_contains(
+            &mut config["channels"]["feishu"]["allowFrom"],
+            &open_id_value,
+        );
+        ensure_string_array_contains(
+            &mut config["channels"]["feishu"]["groupAllowFrom"],
+            &open_id_value,
+        );
+    } else if config.pointer("/channels/feishu/dmPolicy").is_none() {
+        config["channels"]["feishu"]["dmPolicy"] = serde_json::json!("pairing");
+    }
+
+    if config.pointer("/channels/feishu/groupPolicy").is_none() {
+        config["channels"]["feishu"]["groupPolicy"] = serde_json::json!("open");
+    }
+
+    ensure_feishu_plugin_entries(&mut config);
+
+    if let Err(error) = write_openclaw_config(&config) {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: error,
+            code: Some(1),
+        };
+    }
+
+    let restart_args = vec!["gateway".to_string(), "restart".to_string()];
+    let restart_result = run_openclaw_args_timeout(&restart_args, Duration::from_secs(30));
+
+    CommandResult {
+        success: true,
+        stdout: "飞书官方插件绑定完成".to_string(),
+        stderr: if restart_result.success {
+            String::new()
+        } else {
+            restart_result.stderr
+        },
+        code: Some(0),
+    }
+}
+
 fn merge_feishu_channels_from_config(payload: &mut serde_json::Value) {
     let Some(config) = read_openclaw_config() else {
         return;
@@ -6208,6 +6875,11 @@ pub fn run() {
             open_channel_setup_terminal,
             open_update_terminal,
             open_feishu_plugin_terminal,
+            get_feishu_plugin_status,
+            install_feishu_plugin,
+            start_feishu_auth_session,
+            poll_feishu_auth_session,
+            complete_feishu_plugin_binding,
             list_channels,
             get_feishu_channel_config,
             get_channel_status,
