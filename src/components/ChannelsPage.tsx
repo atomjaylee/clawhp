@@ -521,7 +521,7 @@ export default function ChannelsPage() {
     }
     setError("");
     try {
-      const result: CommandResult = await invoke("list_channels");
+      const result: CommandResult = await invoke("list_channels_snapshot");
       if (!result.success) {
         if (!options?.silent) {
           setChannels([]);
