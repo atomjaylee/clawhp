@@ -202,109 +202,6 @@ function parseJsonValue<T>(raw: string, fallback: T): T {
   }
 }
 
-function normalizeStatusMessage(value: Record<string, unknown>) {
-  const messageFields = ["message", "detail", "error", "reason", "lastError", "status"];
-  for (const field of messageFields) {
-    const current = value[field];
-    if (typeof current === "string" && current.trim()) {
-      return current.trim();
-    }
-  }
-  return "";
-}
-
-function inferStatusStateFromText(statusText: string): ChannelStatus["state"] {
-  const normalized = statusText.trim().toLowerCase();
-  if (!normalized) {
-    return "configured";
-  }
-  if (/^(ok|online|connected|ready|running|healthy|works|linked)$/i.test(normalized)) {
-    return "online";
-  }
-  if (/^(configured|enabled|setup|pending|idle)$/i.test(normalized)) {
-    return "configured";
-  }
-  if (/^(disabled|stopped)$/i.test(normalized)) {
-    return "disabled";
-  }
-  if (/(offline|disconnected|failed|error|warning|unreachable|cooldown|degraded|not linked|probe failed|audit failed)/i.test(normalized)) {
-    return "issue";
-  }
-  return "configured";
-}
-
-function normalizeStatusState(value: Record<string, unknown>, statusText: string): ChannelStatus["state"] {
-  const probe = value.probe && typeof value.probe === "object" && !Array.isArray(value.probe)
-    ? value.probe as Record<string, unknown>
-    : null;
-  const audit = value.audit && typeof value.audit === "object" && !Array.isArray(value.audit)
-    ? value.audit as Record<string, unknown>
-    : null;
-
-  const positiveFlags = [
-    value.ok,
-    value.connected,
-    value.running,
-    value.linked,
-    value.healthy,
-    value.available,
-    value.success,
-    probe?.ok,
-  ];
-  if (positiveFlags.some((entry) => entry === true)) {
-    return "online";
-  }
-
-  if (value.enabled === false) {
-    return "disabled";
-  }
-
-  const negativeFlags = [
-    value.ok,
-    value.connected,
-    value.running,
-    value.linked,
-    value.healthy,
-    value.available,
-    value.success,
-    probe?.ok,
-    audit?.ok,
-  ];
-  const hasExplicitIssue = negativeFlags.some((entry) => entry === false)
-    || (typeof value.lastError === "string" && value.lastError.trim().length > 0);
-
-  if (value.configured === true || value.enabled === true) {
-    return hasExplicitIssue ? "issue" : "configured";
-  }
-
-  const inferred = inferStatusStateFromText(statusText);
-  if (inferred !== "configured") {
-    return inferred;
-  }
-
-  return hasExplicitIssue ? "issue" : "configured";
-}
-
-function describeChannelStatus(state: ChannelStatus["state"], message: string) {
-  if (message) {
-    if (state === "configured" && /^(configured|enabled)$/i.test(message)) {
-      return "已配置，等待状态检测";
-    }
-    return message;
-  }
-
-  if (state === "online") {
-    return "在线";
-  }
-  if (state === "disabled") {
-    return "已禁用";
-  }
-  if (state === "issue") {
-    return "需要检查连接";
-  }
-  return "已配置，等待状态检测";
-}
-
 function getChannelStatusMeta(state: ChannelStatus["state"]) {
   if (state === "online") {
     return {
@@ -332,144 +229,6 @@ function getChannelStatusMeta(state: ChannelStatus["state"]) {
     className: "text-sky-300",
     icon: <Radio size={10} />,
   };
-}
-
-function normalizeChannelStatusRecord(channel: string, account: string, value: unknown): ChannelStatus | null {
-  if (!channel.trim()) {
-    return null;
-  }
-
-  if (typeof value === "boolean") {
-    return {
-      channel,
-      account: account || "default",
-      state: value ? "online" : "issue",
-      message: value ? "在线" : "需要检查连接",
-    };
-  }
-
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return null;
-    }
-    return {
-      channel,
-      account: account || "default",
-      state: inferStatusStateFromText(trimmed),
-      message: describeChannelStatus(inferStatusStateFromText(trimmed), trimmed),
-    };
-  }
-
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-
-  const record = value as Record<string, unknown>;
-  const resolvedChannel =
-    (typeof record.channel === "string" && record.channel.trim()) ? record.channel.trim() : channel;
-  const resolvedAccount =
-    (typeof record.account === "string" && record.account.trim())
-      ? record.account.trim()
-      : (typeof record.accountId === "string" && record.accountId.trim())
-        ? record.accountId.trim()
-        : account || "default";
-  const statusText = typeof record.status === "string" ? record.status.trim() : "";
-  const state = normalizeStatusState(record, statusText);
-  const message = describeChannelStatus(state, normalizeStatusMessage(record));
-
-  return {
-    channel: resolvedChannel,
-    account: resolvedAccount,
-    state,
-    message,
-  };
-}
-
-function normalizeChannelStatuses(raw: unknown): ChannelStatus[] {
-  const items: ChannelStatus[] = [];
-  const seen = new Set<string>();
-
-  const push = (entry: ChannelStatus | null) => {
-    if (!entry) {
-      return;
-    }
-    const key = `${entry.channel}:${entry.account}`;
-    if (seen.has(key)) {
-      return;
-    }
-    seen.add(key);
-    items.push(entry);
-  };
-
-  if (Array.isArray(raw)) {
-    for (const entry of raw) {
-      const parsed = normalizeChannelStatusRecord(
-        typeof entry?.channel === "string" ? entry.channel : "",
-        typeof entry?.account === "string" ? entry.account : "default",
-        entry,
-      );
-      push(parsed);
-    }
-    return items;
-  }
-
-  if (!raw || typeof raw !== "object") {
-    return items;
-  }
-
-  const data = raw as Record<string, unknown>;
-  const channelAccounts =
-    data.channelAccounts && typeof data.channelAccounts === "object" && !Array.isArray(data.channelAccounts)
-      ? data.channelAccounts as Record<string, unknown>
-      : {};
-  const defaultAccounts =
-    data.channelDefaultAccountId && typeof data.channelDefaultAccountId === "object" && !Array.isArray(data.channelDefaultAccountId)
-      ? data.channelDefaultAccountId as Record<string, unknown>
-      : {};
-  const channels =
-    data.channels && typeof data.channels === "object" && !Array.isArray(data.channels)
-      ? data.channels as Record<string, unknown>
-      : {};
-
-  for (const [channelName, accountEntries] of Object.entries(channelAccounts)) {
-    if (Array.isArray(accountEntries)) {
-      for (const entry of accountEntries) {
-        push(normalizeChannelStatusRecord(
-          channelName,
-          typeof entry?.accountId === "string" ? entry.accountId : "default",
-          entry,
-        ));
-      }
-      continue;
-    }
-    if (!accountEntries || typeof accountEntries !== "object") {
-      continue;
-    }
-    for (const [accountId, entry] of Object.entries(accountEntries as Record<string, unknown>)) {
-      push(normalizeChannelStatusRecord(channelName, accountId, entry));
-    }
-  }
-
-  for (const [channelName, entry] of Object.entries(channels)) {
-    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-      const nestedAccounts = (entry as Record<string, unknown>).accounts;
-      if (nestedAccounts && typeof nestedAccounts === "object" && !Array.isArray(nestedAccounts)) {
-        for (const [accountId, accountEntry] of Object.entries(nestedAccounts as Record<string, unknown>)) {
-          push(normalizeChannelStatusRecord(channelName, accountId, accountEntry));
-        }
-        continue;
-      }
-    }
-
-    const defaultAccount =
-      typeof defaultAccounts[channelName] === "string" && (defaultAccounts[channelName] as string).trim()
-        ? (defaultAccounts[channelName] as string).trim()
-        : "default";
-    push(normalizeChannelStatusRecord(channelName, defaultAccount, entry));
-  }
-
-  return items;
 }
 
 function formatRemainingSeconds(value: number) {
@@ -507,11 +266,16 @@ function extractChannelEntries(data: Record<string, unknown>) {
   return entries;
 }
 
+function shouldRefreshFeishuDisplayNames(entries: ChannelEntry[]) {
+  return entries.some((entry) => (
+    entry.channel === "feishu"
+    && (!entry.name.trim() || entry.name.trim() === entry.account.trim())
+  ));
+}
+
 export default function ChannelsPage() {
   const [channels, setChannels] = useState<ChannelEntry[]>([]);
-  const [statuses, setStatuses] = useState<ChannelStatus[]>([]);
   const [loading, setLoading] = useState(true);
-  const [checkingStatus, setCheckingStatus] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [pendingRemoval, setPendingRemoval] = useState<PendingRemoval | null>(null);
@@ -771,31 +535,12 @@ export default function ChannelsPage() {
     }
   }, []);
 
-  const fetchStatus = useCallback(async () => {
-    setCheckingStatus(true);
-    try {
-      const result: CommandResult = await invoke("get_channel_status");
-      if (!result.success) {
-        setError((prev) => prev || result.stderr || "频道状态检查失败");
-        return;
-      }
-
-      const data = result.stdout ? parseJsonValue<unknown>(result.stdout, []) : [];
-      setStatuses(normalizeChannelStatuses(data));
-    } catch (e) {
-      setError((prev) => prev || `${e}`);
-    } finally {
-      setCheckingStatus(false);
-    }
-  }, []);
-
   const refreshAll = useCallback(async (options?: { silent?: boolean }) => {
     await Promise.all([
       fetchChannels({ silent: options?.silent }),
-      fetchStatus(),
       loadFeishuBindingCatalog(editingAccountId),
     ]);
-  }, [editingAccountId, fetchChannels, fetchStatus, loadFeishuBindingCatalog]);
+  }, [editingAccountId, fetchChannels, loadFeishuBindingCatalog]);
 
   const refreshFeishuDisplayNames = useCallback(async (accountId?: string | null) => {
     try {
@@ -834,7 +579,12 @@ export default function ChannelsPage() {
           setError(result.stderr || "频道列表加载失败");
         } else {
           const data = result.stdout ? parseJsonValue<Record<string, unknown>>(result.stdout, {}) : {};
-          setChannels(extractChannelEntries(data));
+          const nextChannels = extractChannelEntries(data);
+          setChannels(nextChannels);
+          void loadFeishuBindingCatalog();
+          if (shouldRefreshFeishuDisplayNames(nextChannels)) {
+            void refreshFeishuDisplayNames();
+          }
         }
       } catch (e) {
         if (!cancelled) {
@@ -845,9 +595,6 @@ export default function ChannelsPage() {
           setLoading(false);
         }
       }
-
-      void refreshAll({ silent: true });
-      void refreshFeishuDisplayNames();
     };
 
     void bootstrap();
@@ -855,7 +602,50 @@ export default function ChannelsPage() {
     return () => {
       cancelled = true;
     };
-  }, [refreshAll, refreshFeishuDisplayNames]);
+  }, [loadFeishuBindingCatalog, refreshFeishuDisplayNames]);
+
+  const statuses = useMemo(() => {
+    const feishuBindingByAccount = new Map(
+      (feishuBindingCatalog?.accounts ?? []).map((account) => [account.accountId, account]),
+    );
+
+    return channels.map((channel) => {
+      if (!channel.enabled) {
+        return {
+          channel: channel.channel,
+          account: channel.account,
+          state: "disabled" as const,
+          message: "已禁用",
+        };
+      }
+
+      if (channel.channel === "feishu") {
+        const binding = feishuBindingByAccount.get(channel.account);
+        if (!binding?.boundAgentId) {
+          return {
+            channel: channel.channel,
+            account: channel.account,
+            state: "issue" as const,
+            message: "尚未绑定 Agent",
+          };
+        }
+
+        return {
+          channel: channel.channel,
+          account: channel.account,
+          state: "configured" as const,
+          message: "已绑定 Agent，等待消息接入",
+        };
+      }
+
+      return {
+        channel: channel.channel,
+        account: channel.account,
+        state: "configured" as const,
+        message: "已配置",
+      };
+    });
+  }, [channels, feishuBindingCatalog]);
 
   const getStatus = useCallback((channel: string, account: string) => (
     statuses.find((entry) => entry.channel === channel && (entry.account === account || entry.account === "default"))
@@ -1064,7 +854,6 @@ export default function ChannelsPage() {
       }
 
       setChannels((prev) => prev.filter((entry) => !(entry.channel === channel && entry.account === account)));
-      setStatuses((prev) => prev.filter((entry) => !(entry.channel === channel && entry.account === account)));
       setPendingRemoval(null);
       void refreshAll({ silent: true });
     } catch (e) {
@@ -1360,8 +1149,14 @@ export default function ChannelsPage() {
             <div className="flex items-center gap-1.5">
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void refreshAll()} disabled={loading || checkingStatus}>
-                    {loading || checkingStatus ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={() => void refreshAll()}
+                    disabled={loading || bindingCatalogLoading}
+                  >
+                    {loading || bindingCatalogLoading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>刷新</TooltipContent>
@@ -1431,9 +1226,6 @@ export default function ChannelsPage() {
                                 {statusMeta.icon}
                                 {statusMeta.label}
                               </span>
-                            )}
-                            {checkingStatus && !status && (
-                              <Loader2 size={10} className="animate-spin text-muted-foreground" />
                             )}
                           </div>
                           <p className="mt-0.5 text-[11px] text-muted-foreground">
