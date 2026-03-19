@@ -38,6 +38,7 @@ const WIZARD_TITLES: Record<WizardStep, string> = {
 };
 
 const SYSTEM_INFO_CACHE_KEY = "clawhelp:system-info-cache:v1";
+const CACHED_BOOT_VALIDATION_DELAY_MS = 1600;
 
 function hasUsableExistingInstall(info: SystemInfo) {
   return info.openclaw_fully_installed || (info.openclaw_cli_ok && info.openclaw_config_exists);
@@ -123,12 +124,22 @@ export default function App() {
     }
 
     let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void refreshBootState();
+    }, CACHED_BOOT_VALIDATION_DELAY_MS);
 
     const refreshBootState = async () => {
       try {
-        const info = await invoke<SystemInfo>("check_system");
-        if (!cancelled) {
-          handleDetectionResult(info);
+        const installStillUsable = await invoke<boolean>("check_cached_install_status");
+        if (cancelled) {
+          return;
+        }
+
+        if (!installStillUsable) {
+          const info = await invoke<SystemInfo>("check_system");
+          if (!cancelled) {
+            handleDetectionResult(info);
+          }
         }
       } catch {
         // Keep cached state if the background refresh fails.
@@ -139,10 +150,9 @@ export default function App() {
       }
     };
 
-    void refreshBootState();
-
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [bootRefreshDone, cachedBootInfo, handleDetectionResult]);
 

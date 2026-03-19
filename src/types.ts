@@ -155,6 +155,7 @@ export interface ProviderInfo {
   name: string;
   base_url: string;
   api_key: string;
+  api: string;
   models: ModelEntry[];
 }
 

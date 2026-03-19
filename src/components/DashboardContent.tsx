@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type ComponentProps, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useRef, type ComponentProps, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -34,6 +34,7 @@ type DashboardModuleTab = "overview" | "actions" | "system";
 
 const PORT_POLL_INTERVAL = 5000;
 const SNAPSHOT_POLL_INTERVAL = 30000;
+const INITIAL_DEEP_SNAPSHOT_DELAY_MS = 1800;
 
 interface GatewayLogEvent {
   level: string;
@@ -126,6 +127,8 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   const [openingDashboard, setOpeningDashboard] = useState(false);
   const [configuredChannelCount, setConfiguredChannelCount] = useState(0);
   const [moduleTab, setModuleTab] = useState<DashboardModuleTab>("overview");
+  const [snapshotAttempted, setSnapshotAttempted] = useState(false);
+  const snapshotRefreshRef = useRef<Promise<void> | null>(null);
 
   const checkGateway = useCallback(async () => {
     try {
@@ -146,49 +149,59 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   }, []);
 
   const refreshSnapshots = useCallback(async () => {
-    setStatusLoading(true);
-
-    try {
-      const [gatewayResult, runtimeResult, auditResult] = await Promise.allSettled([
-        invoke<CommandResult>("get_gateway_status_snapshot"),
-        invoke<CommandResult>("get_runtime_status_snapshot"),
-        invoke<CommandResult>("get_security_audit_snapshot"),
-      ]);
-
-      let nextGateway: GatewaySnapshot | null = null;
-      let nextRuntime: RuntimeSnapshot | null = null;
-      let nextAudit: SecurityAuditSnapshot | null = null;
-
-      if (gatewayResult.status === "fulfilled") {
-        nextGateway = parseJsonResult<GatewaySnapshot>(gatewayResult.value);
-      }
-
-      if (runtimeResult.status === "fulfilled") {
-        nextRuntime = parseJsonResult<RuntimeSnapshot>(runtimeResult.value);
-      }
-
-      if (auditResult.status === "fulfilled") {
-        nextAudit = parseJsonResult<SecurityAuditSnapshot>(auditResult.value);
-      }
-
-      if (nextGateway) {
-        setGatewaySnapshot(nextGateway);
-      }
-      if (nextRuntime) {
-        setRuntimeSnapshot(nextRuntime);
-      }
-      if (nextAudit || nextRuntime?.securityAudit) {
-        setSecurityAudit(nextAudit ?? nextRuntime?.securityAudit ?? null);
-      }
-
-      if (nextGateway?.rpc?.ok === false) {
-        setGwMessage(firstMeaningfulLine(nextGateway.rpc.error) ?? "网关已启动，但控制面板暂时连不上");
-      } else if (nextGateway?.gateway?.probeNote) {
-        setGwMessage((current) => current || nextGateway?.gateway?.probeNote || "");
-      }
-    } finally {
-      setStatusLoading(false);
+    if (snapshotRefreshRef.current) {
+      return snapshotRefreshRef.current;
     }
+
+    setSnapshotAttempted(true);
+    setStatusLoading(true);
+    const task = (async () => {
+      try {
+        const [gatewayResult, runtimeResult, auditResult] = await Promise.allSettled([
+          invoke<CommandResult>("get_gateway_status_snapshot"),
+          invoke<CommandResult>("get_runtime_status_snapshot"),
+          invoke<CommandResult>("get_security_audit_snapshot"),
+        ]);
+
+        let nextGateway: GatewaySnapshot | null = null;
+        let nextRuntime: RuntimeSnapshot | null = null;
+        let nextAudit: SecurityAuditSnapshot | null = null;
+
+        if (gatewayResult.status === "fulfilled") {
+          nextGateway = parseJsonResult<GatewaySnapshot>(gatewayResult.value);
+        }
+
+        if (runtimeResult.status === "fulfilled") {
+          nextRuntime = parseJsonResult<RuntimeSnapshot>(runtimeResult.value);
+        }
+
+        if (auditResult.status === "fulfilled") {
+          nextAudit = parseJsonResult<SecurityAuditSnapshot>(auditResult.value);
+        }
+
+        if (nextGateway) {
+          setGatewaySnapshot(nextGateway);
+        }
+        if (nextRuntime) {
+          setRuntimeSnapshot(nextRuntime);
+        }
+        if (nextAudit || nextRuntime?.securityAudit) {
+          setSecurityAudit(nextAudit ?? nextRuntime?.securityAudit ?? null);
+        }
+
+        if (nextGateway?.rpc?.ok === false) {
+          setGwMessage(firstMeaningfulLine(nextGateway.rpc.error) ?? "网关已启动，但控制面板暂时连不上");
+        } else if (nextGateway?.gateway?.probeNote) {
+          setGwMessage((current) => current || nextGateway?.gateway?.probeNote || "");
+        }
+      } finally {
+        snapshotRefreshRef.current = null;
+        setStatusLoading(false);
+      }
+    })();
+
+    snapshotRefreshRef.current = task;
+    return task;
   }, []);
 
   const refreshConfiguredPrimaryModel = useCallback(async () => {
@@ -202,13 +215,20 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
 
   useEffect(() => {
     setGwStatus("checking");
-    checkGateway();
-    refreshSnapshots();
+    void checkGateway();
     void refreshConfiguredChannels();
     void refreshConfiguredPrimaryModel();
 
-    const portTimer = setInterval(checkGateway, PORT_POLL_INTERVAL);
-    const snapshotTimer = setInterval(refreshSnapshots, SNAPSHOT_POLL_INTERVAL);
+    let snapshotTimer: number | null = null;
+    const initialSnapshotTimer = window.setTimeout(() => {
+      void refreshSnapshots();
+      snapshotTimer = window.setInterval(() => {
+        void refreshSnapshots();
+      }, SNAPSHOT_POLL_INTERVAL);
+    }, INITIAL_DEEP_SNAPSHOT_DELAY_MS);
+    const portTimer = window.setInterval(() => {
+      void checkGateway();
+    }, PORT_POLL_INTERVAL);
     const channelTimer = setInterval(() => {
       void refreshConfiguredChannels();
     }, SNAPSHOT_POLL_INTERVAL);
@@ -217,12 +237,23 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
     }, SNAPSHOT_POLL_INTERVAL);
 
     return () => {
+      window.clearTimeout(initialSnapshotTimer);
       clearInterval(portTimer);
-      clearInterval(snapshotTimer);
+      if (snapshotTimer) {
+        clearInterval(snapshotTimer);
+      }
       clearInterval(channelTimer);
       clearInterval(primaryTimer);
     };
   }, [checkGateway, refreshSnapshots, refreshConfiguredChannels, refreshConfiguredPrimaryModel]);
+
+  useEffect(() => {
+    if (moduleTab !== "system" || snapshotAttempted) {
+      return;
+    }
+
+    void refreshSnapshots();
+  }, [moduleTab, refreshSnapshots, snapshotAttempted]);
 
   useEffect(() => {
     const unlisten = listen<GatewayLogEvent>("gateway-log", (event) => {

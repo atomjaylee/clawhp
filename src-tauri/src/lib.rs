@@ -663,6 +663,21 @@ async fn check_system() -> SystemInfo {
     })
 }
 
+#[tauri::command]
+async fn check_cached_install_status() -> bool {
+    tokio::task::spawn_blocking(move || {
+        let openclaw_home = get_openclaw_home();
+        let openclaw_home_path = Path::new(&openclaw_home);
+        let openclaw_home_exists = openclaw_home_path.exists() && openclaw_home_path.is_dir();
+        let openclaw_config_exists = get_openclaw_config_path().is_some();
+        let openclaw_cli_ok = command_exists("openclaw");
+
+        openclaw_cli_ok && openclaw_config_exists && openclaw_home_exists
+    })
+    .await
+    .unwrap_or(false)
+}
+
 // ---------- Memory detection ----------
 
 #[cfg(target_os = "macos")]
@@ -6009,7 +6024,46 @@ pub struct ProviderInfo {
     pub name: String,
     pub base_url: String,
     pub api_key: String,
+    pub api: String,
     pub models: Vec<ModelEntry>,
+}
+
+const OPENAI_COMPLETIONS_API: &str = "openai-completions";
+const ANTHROPIC_MESSAGES_API: &str = "anthropic-messages";
+const ANTHROPIC_VERSION_HEADER: &str = "2023-06-01";
+
+fn normalize_provider_api(api: Option<&str>) -> &'static str {
+    match api.map(str::trim) {
+        Some(ANTHROPIC_MESSAGES_API) => ANTHROPIC_MESSAGES_API,
+        _ => OPENAI_COMPLETIONS_API,
+    }
+}
+
+fn provider_api_from_config(provider: &serde_json::Value) -> String {
+    provider
+        .get("api")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            provider
+                .get("models")
+                .and_then(|value| value.as_array())
+                .and_then(|models| {
+                    models.iter().find_map(|model| {
+                        model.get("api").and_then(|value| value.as_str())
+                    })
+                })
+        })
+        .map(|value| normalize_provider_api(Some(value)).to_string())
+        .unwrap_or_else(|| OPENAI_COMPLETIONS_API.to_string())
+}
+
+fn ensure_model_api(model: &mut serde_json::Value, provider_api: &str) {
+    if let Some(object) = model.as_object_mut() {
+        object.insert(
+            "api".to_string(),
+            serde_json::Value::String(provider_api.to_string()),
+        );
+    }
 }
 
 #[tauri::command]
@@ -6039,6 +6093,7 @@ fn list_providers() -> Vec<ProviderInfo> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let api = provider_api_from_config(provider);
         let mut models = Vec::new();
 
         if let Some(arr) = provider.get("models").and_then(|v| v.as_array()) {
@@ -6082,6 +6137,7 @@ fn list_providers() -> Vec<ProviderInfo> {
             name: name.clone(),
             base_url,
             api_key,
+            api,
             models,
         });
     }
@@ -6102,26 +6158,40 @@ fn get_primary_model() -> String {
 }
 
 #[tauri::command]
-fn fetch_remote_models(base_url: String, api_key: String) -> CommandResult {
+fn fetch_remote_models(base_url: String, api_key: String, api_adapter: Option<String>) -> CommandResult {
+    let provider_api = normalize_provider_api(api_adapter.as_deref());
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let args = vec![
+    let mut args = vec![
         "-s".to_string(),
         "--max-time".to_string(),
         "15".to_string(),
         "-w".to_string(),
         "\n%{http_code}".to_string(),
         url,
-        "-H".to_string(),
-        format!("Authorization: Bearer {}", api_key),
-        "-H".to_string(),
-        "Accept: application/json".to_string(),
     ];
+
+    match provider_api {
+        ANTHROPIC_MESSAGES_API => {
+            args.push("-H".to_string());
+            args.push(format!("x-api-key: {}", api_key));
+            args.push("-H".to_string());
+            args.push(format!("anthropic-version: {}", ANTHROPIC_VERSION_HEADER));
+        }
+        _ => {
+            args.push("-H".to_string());
+            args.push(format!("Authorization: Bearer {}", api_key));
+        }
+    }
+
+    args.push("-H".to_string());
+    args.push("Accept: application/json".to_string());
+
     let result = run_cmd_owned("curl", &args);
     if !result.success {
         return CommandResult {
             success: false,
             stdout: String::new(),
-            stderr: "无法连接 API 平台，请检查地址和 Key".to_string(),
+            stderr: "无法连接 API 平台，请检查地址、Key 和兼容协议".to_string(),
             code: Some(1),
         };
     }
@@ -6139,7 +6209,7 @@ fn fetch_remote_models(base_url: String, api_key: String) -> CommandResult {
         return CommandResult {
             success: false,
             stdout: String::new(),
-            stderr: format!("API 请求失败 (HTTP {})，请检查地址和 Key", http_code),
+            stderr: format!("API 请求失败 (HTTP {})，请检查地址、Key 和兼容协议", http_code),
             code: Some(1),
         };
     }
@@ -6310,7 +6380,7 @@ fn detect_model_caps(model_id: &str) -> (Vec<String>, bool, u64, u64) {
     (input, reasoning, ctx, max)
 }
 
-fn build_model_json(model_id: &str) -> serde_json::Value {
+fn build_model_json(model_id: &str, api_adapter: &str) -> serde_json::Value {
     let (input, reasoning, ctx, max) = detect_model_caps(model_id);
     serde_json::json!({
         "id": model_id,
@@ -6320,7 +6390,7 @@ fn build_model_json(model_id: &str) -> serde_json::Value {
         "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
         "contextWindow": ctx,
         "maxTokens": max,
-        "api": "openai-completions"
+        "api": normalize_provider_api(Some(api_adapter))
     })
 }
 
@@ -6465,8 +6535,11 @@ fn sync_models_to_provider(
     provider_name: String,
     base_url: String,
     api_key: String,
+    api_adapter: Option<String>,
     model_ids: Vec<String>,
 ) -> CommandResult {
+    let provider_api = normalize_provider_api(api_adapter.as_deref());
+    let model_ids = dedupe_model_ids(model_ids);
     let mut config = match read_openclaw_config() {
         Some(c) => c,
         None => {
@@ -6485,6 +6558,22 @@ fn sync_models_to_provider(
     }
 
     let providers = config["models"]["providers"].as_object_mut().unwrap();
+    let metadata_changed = providers
+        .get(&provider_name)
+        .map(|provider| {
+            provider
+                .get("baseUrl")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                != base_url.as_str()
+                || provider
+                    .get("apiKey")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    != api_key.as_str()
+                || provider_api_from_config(provider) != provider_api
+        })
+        .unwrap_or(false);
 
     // Get existing model IDs for this provider
     let existing_ids: Vec<String> = providers
@@ -6505,10 +6594,10 @@ fn sync_models_to_provider(
             skip += 1;
             continue;
         }
-        new_models.push(build_model_json(mid));
+        new_models.push(build_model_json(mid, provider_api));
     }
 
-    if new_models.is_empty() {
+    if new_models.is_empty() && !metadata_changed {
         return CommandResult {
             success: true,
             stdout: format!("跳过 {} 个已存在的模型，没有新模型需要添加", skip),
@@ -6518,10 +6607,19 @@ fn sync_models_to_provider(
     }
 
     if let Some(provider) = providers.get_mut(&provider_name) {
+        provider["baseUrl"] = serde_json::Value::String(base_url.clone());
+        provider["apiKey"] = serde_json::Value::String(api_key.clone());
+        provider["api"] = serde_json::Value::String(provider_api.to_string());
+
         if let Some(models) = provider.get_mut("models").and_then(|m| m.as_array_mut()) {
+            for model in models.iter_mut() {
+                ensure_model_api(model, provider_api);
+            }
             for m in &new_models {
                 models.push(m.clone());
             }
+        } else {
+            provider["models"] = serde_json::Value::Array(new_models.clone());
         }
     } else {
         providers.insert(
@@ -6529,7 +6627,7 @@ fn sync_models_to_provider(
             serde_json::json!({
                 "baseUrl": base_url,
                 "apiKey": api_key,
-                "api": "openai-completions",
+                "api": provider_api,
                 "models": new_models
             }),
         );
@@ -6549,17 +6647,30 @@ fn sync_models_to_provider(
     }
 
     match write_openclaw_config(&config) {
-        Ok(_) => CommandResult {
-            success: true,
-            stdout: format!(
-                "已添加 {} 个模型到 {}（跳过 {} 个已存在）",
-                new_models.len(),
-                provider_name,
-                skip
-            ),
-            stderr: String::new(),
-            code: Some(0),
-        },
+        Ok(_) => {
+            let mut parts = Vec::new();
+
+            if new_models.is_empty() {
+                parts.push(format!("{} 的模型列表未变化", provider_name));
+            } else {
+                parts.push(format!("已添加 {} 个模型到 {}", new_models.len(), provider_name));
+            }
+
+            if skip > 0 {
+                parts.push(format!("跳过 {} 个已存在", skip));
+            }
+
+            if metadata_changed {
+                parts.push("已更新连接配置".to_string());
+            }
+
+            CommandResult {
+                success: true,
+                stdout: parts.join("，"),
+                stderr: String::new(),
+                code: Some(0),
+            }
+        }
         Err(e) => CommandResult {
             success: false,
             stdout: String::new(),
@@ -6574,8 +6685,10 @@ fn reconcile_provider_models(
     provider_name: String,
     base_url: String,
     api_key: String,
+    api_adapter: Option<String>,
     selected_model_ids: Vec<String>,
 ) -> CommandResult {
+    let provider_api = normalize_provider_api(api_adapter.as_deref());
     let mut config = match read_openclaw_config() {
         Some(c) => c,
         None => {
@@ -6638,13 +6751,15 @@ fn reconcile_provider_models(
         let final_models = selected_model_ids
             .iter()
             .map(|model_id| {
-                existing_models
+                let mut model = existing_models
                     .iter()
                     .find(|model| {
                         model.get("id").and_then(|value| value.as_str()) == Some(model_id.as_str())
                     })
                     .cloned()
-                    .unwrap_or_else(|| build_model_json(model_id))
+                    .unwrap_or_else(|| build_model_json(model_id, provider_api));
+                ensure_model_api(&mut model, provider_api);
+                model
             })
             .collect::<Vec<_>>();
 
@@ -6657,7 +6772,7 @@ fn reconcile_provider_models(
                 serde_json::json!({
                     "baseUrl": base_url,
                     "apiKey": api_key,
-                    "api": "openai-completions",
+                    "api": provider_api,
                     "models": final_models,
                 }),
             );
@@ -10148,6 +10263,7 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .invoke_handler(tauri::generate_handler![
             check_system,
+            check_cached_install_status,
             run_install_command,
             run_uninstall_command,
             run_onboard,

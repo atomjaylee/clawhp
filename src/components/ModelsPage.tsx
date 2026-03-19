@@ -15,6 +15,7 @@ import type { ProviderInfo, CommandResult } from "@/types";
 
 type View = "list" | "add" | "sync" | "refresh";
 type ModelsModuleTab = "configured" | "overview";
+type ProviderApiAdapter = "openai-completions" | "anthropic-messages";
 type PendingDelete =
   | { kind: "provider"; providerName: string }
   | { kind: "model"; providerName: string; modelId: string; isPrimary: boolean };
@@ -29,6 +30,7 @@ interface ProviderPreset {
   description: string;
   baseUrl: string;
   defaultName: string;
+  apiAdapter: ProviderApiAdapter;
   defaultKey?: string;
 }
 
@@ -36,6 +38,31 @@ interface RefreshCandidate {
   id: string;
   status: RefreshCandidateStatus;
 }
+
+const DEFAULT_PROVIDER_API: ProviderApiAdapter = "openai-completions";
+const PROVIDER_API_OPTIONS: ProviderApiAdapter[] = [
+  DEFAULT_PROVIDER_API,
+  "anthropic-messages",
+];
+const PROVIDER_API_META: Record<ProviderApiAdapter, {
+  label: string;
+  shortLabel: string;
+  description: string;
+  keyPlaceholder: string;
+}> = {
+  "openai-completions": {
+    label: "OpenAI 兼容",
+    shortLabel: "OpenAI",
+    description: "适合 Bearer Token + /models 这类 OpenAI 风格接口，例如 OpenAI、OpenRouter、Ollama 兼容网关。",
+    keyPlaceholder: "sk-...",
+  },
+  "anthropic-messages": {
+    label: "Anthropic 兼容",
+    shortLabel: "Anthropic",
+    description: "适合 Claude / Anthropic 风格接口，会按 x-api-key 和 anthropic-version 请求模型列表。",
+    keyPlaceholder: "sk-ant-...",
+  },
+};
 
 const PROVIDER_PRESETS: ProviderPreset[] = [
   {
@@ -45,6 +72,7 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     description: "GPT 系列直连入口，适合官方 API 工作流。",
     baseUrl: "https://api.openai.com/v1",
     defaultName: "openai",
+    apiAdapter: "openai-completions",
   },
   {
     id: "openrouter",
@@ -53,6 +81,7 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     description: "聚合多家模型，适合快速对比和补齐模型池。",
     baseUrl: "https://openrouter.ai/api/v1",
     defaultName: "openrouter",
+    apiAdapter: "openai-completions",
   },
   {
     id: "ollama",
@@ -61,9 +90,27 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     description: "本地模型与局域网推理，适合离线和隐私优先工作流。",
     baseUrl: "http://127.0.0.1:11434/v1",
     defaultName: "ollama",
+    apiAdapter: "openai-completions",
     defaultKey: "ollama",
   },
+  {
+    id: "anthropic",
+    title: "Anthropic",
+    badge: "官方",
+    description: "Claude 官方与 Anthropic 风格网关，适合 messages 协议入口。",
+    baseUrl: "https://api.anthropic.com/v1",
+    defaultName: "anthropic",
+    apiAdapter: "anthropic-messages",
+  },
 ];
+
+function normalizeProviderApi(api?: string): ProviderApiAdapter {
+  return api === "anthropic-messages" ? "anthropic-messages" : DEFAULT_PROVIDER_API;
+}
+
+function getProviderApiMeta(api?: string) {
+  return PROVIDER_API_META[normalizeProviderApi(api)];
+}
 
 export default function ModelsPage() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -76,6 +123,7 @@ export default function ModelsPage() {
   const [addUrl, setAddUrl] = useState("");
   const [addKey, setAddKey] = useState("");
   const [addName, setAddName] = useState("");
+  const [addApiAdapter, setAddApiAdapter] = useState<ProviderApiAdapter>(DEFAULT_PROVIDER_API);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [remoteModels, setRemoteModels] = useState<string[]>([]);
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
@@ -92,6 +140,7 @@ export default function ModelsPage() {
     setAddUrl(preset.baseUrl);
     setAddName(preset.defaultName);
     setAddKey(preset.defaultKey ?? "");
+    setAddApiAdapter(preset.apiAdapter);
     setView("add");
   };
 
@@ -175,7 +224,11 @@ export default function ModelsPage() {
     setFetchingModels(true);
     setRemoteModels([]);
     try {
-      const r: CommandResult = await invoke("fetch_remote_models", { baseUrl: addUrl, apiKey: addKey });
+      const r: CommandResult = await invoke("fetch_remote_models", {
+        baseUrl: addUrl,
+        apiKey: addKey,
+        apiAdapter: addApiAdapter,
+      });
       if (r.success) {
         const ids: string[] = JSON.parse(r.stdout);
         setRemoteModels(ids);
@@ -197,6 +250,7 @@ export default function ModelsPage() {
     try {
       const r: CommandResult = await invoke("sync_models_to_provider", {
         providerName: addName, baseUrl: addUrl, apiKey: addKey,
+        apiAdapter: addApiAdapter,
         modelIds: Array.from(selectedModels),
       });
       if (r.success) {
@@ -215,6 +269,7 @@ export default function ModelsPage() {
       const result: CommandResult = await invoke("fetch_remote_models", {
         baseUrl: provider.base_url,
         apiKey: provider.api_key,
+        apiAdapter: provider.api,
       });
 
       if (!result.success) {
@@ -248,6 +303,7 @@ export default function ModelsPage() {
         providerName: refreshProvider.name,
         baseUrl: refreshProvider.base_url,
         apiKey: refreshProvider.api_key,
+        apiAdapter: refreshProvider.api,
         selectedModelIds: selectedIds,
       });
 
@@ -273,6 +329,7 @@ export default function ModelsPage() {
     setAddUrl("");
     setAddKey("");
     setAddName("");
+    setAddApiAdapter(DEFAULT_PROVIDER_API);
     setRemoteModels([]);
     setSelectedModels(new Set());
     setRefreshingProviderName("");
@@ -346,6 +403,7 @@ export default function ModelsPage() {
     (candidate) => candidate.status === "missing" && refreshSelectedModels.has(candidate.id),
   ).length;
   const refreshRemoteCount = refreshCandidates.filter((candidate) => candidate.status !== "missing").length;
+  const addApiMeta = getProviderApiMeta(addApiAdapter);
 
   if (view === "add" || view === "sync" || view === "refresh") {
     return (
@@ -369,19 +427,53 @@ export default function ModelsPage() {
                 <Card>
                   <CardContent className="p-5 space-y-4">
                     <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-2.5 text-[12px] text-muted-foreground">
-                      先选少数常用预设即可，其他兼容服务直接手动填写 URL、Key 和 Provider 名称。
+                      先选常用预设，或者手动选择兼容协议后填写 URL、Key 和 Provider 名称。
+                    </div>
+                    <div>
+                      <label className="text-[12px] text-muted-foreground mb-1.5 block">兼容协议</label>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {PROVIDER_API_OPTIONS.map((api) => {
+                          const meta = PROVIDER_API_META[api];
+                          const active = addApiAdapter === api;
+                          return (
+                            <button
+                              key={api}
+                              type="button"
+                              onClick={() => setAddApiAdapter(api)}
+                              className={`rounded-xl border px-3 py-3 text-left transition-colors ${
+                                active
+                                  ? "border-primary/35 bg-primary/[0.08]"
+                                  : "border-white/[0.06] bg-white/[0.03] hover:bg-white/[0.05]"
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[13px] font-medium text-foreground/90">{meta.label}</span>
+                                {active ? (
+                                  <Badge className="h-5 border-0 bg-primary/15 text-[10px] text-primary">
+                                    当前
+                                  </Badge>
+                                ) : null}
+                              </div>
+                              <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">{meta.description}</p>
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                     <div>
                       <label className="text-[12px] text-muted-foreground mb-1.5 block">API 地址</label>
-                      <input className={inputCls} placeholder="http://host:port/v1" value={addUrl} onChange={(e) => setAddUrl(e.target.value)} />
+                      <input className={inputCls} placeholder="https://host/v1" value={addUrl} onChange={(e) => setAddUrl(e.target.value)} />
                     </div>
                     <div>
                       <label className="text-[12px] text-muted-foreground mb-1.5 block">API Key</label>
-                      <input className={inputCls} type="password" placeholder="sk-..." value={addKey} onChange={(e) => setAddKey(e.target.value)} />
+                      <input className={inputCls} type="password" placeholder={addApiMeta.keyPlaceholder} value={addKey} onChange={(e) => setAddKey(e.target.value)} />
                     </div>
                     <div>
                       <label className="text-[12px] text-muted-foreground mb-1.5 block">Provider 名称</label>
                       <input className={inputCls} placeholder="自动生成或自定义" value={addName} onChange={(e) => setAddName(e.target.value)} />
+                    </div>
+                    <div className="rounded-xl border border-white/[0.06] bg-black/10 px-3 py-2 text-[11px] text-muted-foreground">
+                      当前会按 <span className="font-medium text-foreground/85">{addApiMeta.label}</span> 协议去拉取模型列表，并把这个协议一起写入 Provider 配置。
                     </div>
                     <div className="pt-1">
                       <Button size="sm" onClick={handleFetchRemote} disabled={!addUrl || !addKey || fetchingModels}>
@@ -401,6 +493,9 @@ export default function ModelsPage() {
                     <div className="flex items-center justify-between mb-3">
                       <div className="flex items-center gap-2">
                         <span className="text-[13px] font-medium">{addName}</span>
+                        <Badge className="text-[10px] h-5 px-1.5 border-0 bg-sky-500/10 text-sky-300">
+                          {addApiMeta.shortLabel}
+                        </Badge>
                         <Badge className="text-[10px] h-5 px-1.5 border-0 bg-teal-500/15 text-teal-400">
                           {selectedModels.size}/{remoteModels.length}
                         </Badge>
@@ -447,6 +542,9 @@ export default function ModelsPage() {
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="text-[13px] font-medium">{refreshProvider.name}</span>
+                          <Badge className="h-5 border-0 bg-sky-500/10 px-1.5 text-[10px] text-sky-300">
+                            {getProviderApiMeta(refreshProvider.api).shortLabel}
+                          </Badge>
                           <Badge className="h-5 border-0 bg-violet-500/10 px-1.5 text-[10px] text-violet-300">
                             本地 {refreshProvider.models.length}
                           </Badge>
@@ -696,7 +794,12 @@ export default function ModelsPage() {
                           <Card key={provider.name} className="border-white/[0.06] bg-black/10">
                             <CardContent className="space-y-2 p-4">
                               <div className="flex items-center justify-between gap-2">
-                                <p className="truncate text-[13px] font-semibold">{provider.name}</p>
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <p className="truncate text-[13px] font-semibold">{provider.name}</p>
+                                  <Badge className="h-5 border-0 bg-sky-500/10 px-1.5 text-[10px] text-sky-300">
+                                    {getProviderApiMeta(provider.api).shortLabel}
+                                  </Badge>
+                                </div>
                                 <Badge className="border-0 bg-violet-500/10 text-violet-300">
                                   {provider.models.length} 模型
                                 </Badge>
@@ -775,6 +878,7 @@ function ProviderCard({ provider, primaryModel, onDelete, onSetPrimary, onRemove
   const sortedModels = [...provider.models].sort((a, b) => compareModels(provider.name, a, b, primaryModel));
   const primaryModelEntry = sortedModels.find((model) => `${provider.name}/${model.id}` === primaryModel) ?? null;
   const previewModelIds = sortedModels.slice(0, 3).map((model) => model.id);
+  const apiMeta = getProviderApiMeta(provider.api);
 
   const maskedKey = provider.api_key
     ? `${provider.api_key.slice(0, 6)}...${provider.api_key.slice(-4)}`
@@ -801,6 +905,9 @@ function ProviderCard({ provider, primaryModel, onDelete, onSetPrimary, onRemove
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <span className="text-[13px] font-medium">{provider.name}</span>
+              <Badge className="text-[10px] h-4 px-1.5 border-0 bg-sky-500/10 text-sky-300">
+                {apiMeta.shortLabel}
+              </Badge>
               <Badge className="text-[10px] h-4 px-1.5 border-0 bg-violet-500/10 text-violet-400">
                 {provider.models.length} 模型
               </Badge>
@@ -822,6 +929,9 @@ function ProviderCard({ provider, primaryModel, onDelete, onSetPrimary, onRemove
               )}
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <Badge className="h-5 border-0 bg-sky-500/10 px-2 text-[10px] text-sky-300">
+                {apiMeta.label}
+              </Badge>
               {primaryModelEntry ? (
                 <Badge className="h-5 border-0 bg-amber-500/10 px-2 text-[10px] text-amber-300">
                   主模型 {primaryModelEntry.id}
@@ -1041,7 +1151,7 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
       </div>
       <h3 className="text-sm font-medium mb-1">还没有配置模型</h3>
       <p className="text-[12px] text-muted-foreground mb-5 max-w-[260px]">
-        先选一个常用入口，或者手动添加 OpenAI 兼容 URL 来同步模型。
+        先选一个常用入口，或者手动添加 OpenAI / Anthropic 兼容 URL 来同步模型。
       </p>
       <Button size="sm" onClick={onAdd}>
         <Plus /> 添加 Provider
@@ -1061,11 +1171,11 @@ function PresetGallery({ onSelect, compact = false }: {
           <div>
             <h3 className="text-[13px] font-semibold">常用 Provider 预设</h3>
             <p className="text-[11px] text-muted-foreground mt-1">
-              保留最常用的 3 个入口，其余兼容服务建议直接手动填写。
+              保留最常用的 4 个入口，覆盖 OpenAI 和 Anthropic 两类兼容协议。
             </p>
           </div>
           <Badge className="border-0 bg-violet-500/10 text-violet-400 text-[10px]">
-            OpenAI-compatible
+            双协议
           </Badge>
         </div>
 
@@ -1078,7 +1188,12 @@ function PresetGallery({ onSelect, compact = false }: {
               className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-left transition-colors hover:border-violet-500/20 hover:bg-white/[0.05]"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[13px] font-medium text-foreground/90">{preset.title}</span>
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="text-[13px] font-medium text-foreground/90">{preset.title}</span>
+                  <Badge className="h-5 border-0 bg-sky-500/10 px-1.5 text-[10px] text-sky-300">
+                    {getProviderApiMeta(preset.apiAdapter).shortLabel}
+                  </Badge>
+                </div>
                 <Badge className="h-5 border-0 bg-white/[0.06] text-[10px] text-muted-foreground">
                   {preset.badge}
                 </Badge>

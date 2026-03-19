@@ -714,7 +714,7 @@ export default function SkillsPage() {
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap gap-2 lg:justify-end">
+                  <div className="flex h-fit flex-wrap items-center gap-2 lg:self-end lg:justify-end">
                     {[
                       { id: "all", label: "全部" },
                       { id: "ready", label: "可直接用" },
@@ -723,7 +723,7 @@ export default function SkillsPage() {
                       <button
                         key={filter.id}
                         type="button"
-                        className={`rounded-full border px-3 py-1.5 text-[12px] transition-colors ${
+                        className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[12px] font-medium transition-colors ${
                           bundledFilter === filter.id
                             ? "border-cyan-400/40 bg-cyan-500/12 text-cyan-100"
                             : "border-white/[0.08] bg-white/[0.03] text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"

@@ -76,6 +76,7 @@ interface FeishuAuthPollPayload {
 }
 
 type FeishuSetupStep = "install" | "bind" | "done";
+type FeishuDialogTab = "install" | "agent" | "qr" | "existing" | "status";
 type ChannelsModuleTab = "list" | "guide";
 
 interface ExistingFeishuBindingForm {
@@ -310,6 +311,7 @@ export default function ChannelsPage() {
   const [bindingCatalogError, setBindingCatalogError] = useState("");
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [moduleTab, setModuleTab] = useState<ChannelsModuleTab>("list");
+  const [dialogTab, setDialogTab] = useState<FeishuDialogTab>("install");
   const [unbindLoading, setUnbindLoading] = useState(false);
 
   const installProgressRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -413,6 +415,65 @@ export default function ChannelsPage() {
   const currentBoundAgentLabel = currentBoundAgentId
     ? (agentLabelById.get(currentBoundAgentId) || currentBoundAgentId)
     : "";
+  const dialogBusy = installPhase === "running"
+    || bindingPhase === "waiting"
+    || bindingPhase === "finalizing"
+    || existingBinding
+    || unbindLoading;
+  const bindingStatusLabel = unbindLoading
+    ? "解绑中"
+    : existingBinding
+      ? "校验已有机器人"
+      : bindingPhase === "done"
+        ? "已完成"
+        : bindingPhase === "finalizing"
+          ? "写入配置中"
+          : bindingPhase === "waiting"
+            ? "等待扫码"
+            : currentBoundAgentId
+              ? "已绑定"
+              : "尚未开始";
+  const dialogTabs: ModuleTabItem<FeishuDialogTab>[] = setupStep === "install"
+    ? [
+      {
+        id: "install",
+        label: "安装插件",
+        icon: Settings2,
+        badge: installPhase === "running" ? "进行中" : "需要",
+      },
+      {
+        id: "status",
+        label: "当前状态",
+        icon: CheckCircle2,
+        badge: feishuStatus?.officialPluginInstalled ? "已装" : "待装",
+      },
+    ]
+    : [
+      {
+        id: "agent",
+        label: "绑定关系",
+        icon: Bot,
+        badge: currentBoundAgentId ? "已绑定" : (selectedAgentId ? "已选" : "待选"),
+      },
+      {
+        id: "qr",
+        label: "扫码创建",
+        icon: Radio,
+        badge: bindingPhase === "waiting" ? "进行中" : undefined,
+      },
+      {
+        id: "existing",
+        label: "已有机器人",
+        icon: MessageSquare,
+        badge: existingBinding ? "提交中" : (existingBindingForm.appId.trim() ? "已填" : undefined),
+      },
+      {
+        id: "status",
+        label: "当前状态",
+        icon: CheckCircle2,
+        badge: currentBoundAgentId ? "已绑定" : (setupStep === "done" ? "完成" : "待绑定"),
+      },
+    ];
 
   const loadFeishuBindingCatalog = useCallback(async (targetAccountId?: string | null) => {
     setBindingCatalogLoading(true);
@@ -634,6 +695,7 @@ export default function ChannelsPage() {
   const resetFeishuDialogState = useCallback(() => {
     setSetupError("");
     setSetupStep("install");
+    setDialogTab("install");
     setFeishuStatus(null);
     setInstallPhase("idle");
     setInstallProgress(0);
@@ -658,6 +720,20 @@ export default function ChannelsPage() {
     setSelectedAgentId("");
     setUnbindLoading(false);
   }, []);
+
+  useEffect(() => {
+    if (!dialogOpen) {
+      return;
+    }
+
+    setDialogTab((current) => {
+      if (setupStep === "install") {
+        return current === "status" ? "status" : "install";
+      }
+
+      return current === "install" ? "agent" : current;
+    });
+  }, [dialogOpen, setupStep]);
 
   const loadFeishuSetup = useCallback(async () => {
     setSetupLoading(true);
@@ -791,13 +867,13 @@ export default function ChannelsPage() {
   }, [loadFeishuBindingCatalog, loadFeishuChannelConfig, loadFeishuSetup, refreshFeishuDisplayNames, resetFeishuDialogState]);
 
   const closeDialog = useCallback(() => {
-    if (installPhase === "running" || bindingPhase === "waiting" || bindingPhase === "finalizing" || existingBinding || unbindLoading) {
+    if (dialogBusy) {
       return;
     }
     setDialogOpen(false);
     setEditingAccountId(null);
     resetFeishuDialogState();
-  }, [bindingPhase, existingBinding, installPhase, resetFeishuDialogState, unbindLoading]);
+  }, [dialogBusy, resetFeishuDialogState]);
 
   const openRemoveDialog = useCallback((channel: string, account: string) => {
     setRemoveError("");
@@ -1333,12 +1409,12 @@ export default function ChannelsPage() {
                     <div>
                       <h3 className="text-[13px] font-semibold">{editingAccountId ? "管理飞书接入" : "添加飞书"}</h3>
                       <p className="text-[11px] text-muted-foreground">
-                        直接在应用内完成官方插件安装、扫码新建和已有机器人绑定，不再外跳终端。
+                        弹窗里只保留实际操作和实时状态，外层步骤说明不再重复展示。
                       </p>
                     </div>
                   </div>
                 </div>
-                <Button size="sm" variant="ghost" onClick={closeDialog} disabled={installPhase === "running" || bindingPhase === "waiting" || bindingPhase === "finalizing" || existingBinding || unbindLoading}>
+                <Button size="sm" variant="ghost" onClick={closeDialog} disabled={dialogBusy}>
                   关闭
                 </Button>
               </div>
@@ -1360,45 +1436,21 @@ export default function ChannelsPage() {
                       {bindingHint}
                     </div>
                   )}
+                  <ModuleTabs items={dialogTabs} value={dialogTab} onValueChange={setDialogTab} />
 
-                  <div className="grid gap-3 md:grid-cols-3">
-                    <Card className={`border-white/[0.08] ${setupStep === "install" ? "bg-sky-500/10" : "bg-white/[0.02]"}`}>
-                      <CardContent className="space-y-2 p-4">
-                        <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 1 步</p>
-                        <h4 className="text-[13px] font-semibold">安装官方插件</h4>
-                        <p className="text-[12px] leading-5 text-muted-foreground">
-                          自动检测本机是否已安装飞书官方插件，缺失时直接在应用内完成安装。
-                        </p>
-                      </CardContent>
-                    </Card>
-                    <Card className={`border-white/[0.08] ${setupStep === "bind" ? "bg-sky-500/10" : "bg-white/[0.02]"}`}>
-                      <CardContent className="space-y-2 p-4">
-                        <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 2 步</p>
-                        <h4 className="text-[13px] font-semibold">选择 Agent 并绑定</h4>
-                        <p className="text-[12px] leading-5 text-muted-foreground">
-                          飞书频道和 Agent 已经解耦，但始终保持一对一；绑定后如需更换，必须先解绑。
-                        </p>
-                      </CardContent>
-                    </Card>
-                    <Card className={`border-white/[0.08] ${setupStep === "done" ? "bg-emerald-500/10" : "bg-white/[0.02]"}`}>
-                      <CardContent className="space-y-2 p-4">
-                        <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 3 步</p>
-                        <h4 className="text-[13px] font-semibold">写入账号并后台生效</h4>
-                        <p className="text-[12px] leading-5 text-muted-foreground">
-                          绑定成功后会同时写入飞书账号和绑定关系，并在后台刷新网关和频道列表。
-                        </p>
-                      </CardContent>
-                    </Card>
-                  </div>
-
-                  {setupStep === "install" && (
+                  {setupStep === "install" && dialogTab === "install" && (
                     <Card className="border-white/[0.08] bg-white/[0.02]">
                       <CardContent className="space-y-4 p-4">
-                        <div className="space-y-1">
-                          <h4 className="text-[14px] font-semibold">先安装飞书官方插件</h4>
-                          <p className="text-[12px] text-muted-foreground">
-                            检测到当前环境还没有官方飞书插件。点一下按钮，应用会自动完成安装，装好后你就可以扫码创建新机器人，或绑定已有机器人。
-                          </p>
+                        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                          <div className="space-y-1">
+                            <h4 className="text-[14px] font-semibold">官方插件安装</h4>
+                            <p className="text-[12px] text-muted-foreground">
+                              当前环境还没装好官方飞书插件。安装完成后，这个弹窗里的绑定标签页就可以直接继续使用。
+                            </p>
+                          </div>
+                          <Badge variant="outline" className="h-6 border-white/[0.08] bg-white/[0.03] px-2 text-[10px] text-muted-foreground">
+                            {installPhase === "running" ? "安装中" : installSuccess ? "已完成" : "待安装"}
+                          </Badge>
                         </div>
 
                         {showInstallLogs && (
@@ -1449,347 +1501,423 @@ export default function ChannelsPage() {
                     </Card>
                   )}
 
-                  {(setupStep === "bind" || setupStep === "done") && (
-                    <div className="space-y-4">
-                      <div className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
-                        <Card className="border-white/[0.08] bg-white/[0.02]">
-                          <CardContent className="space-y-4 p-4">
-                            <div className="space-y-1">
-                              <h4 className="text-[14px] font-semibold">
-                                {editingAccountId ? "管理飞书频道绑定" : "绑定新的飞书频道"}
-                              </h4>
-                              <p className="text-[12px] text-muted-foreground">
-                                先选一个未绑定的 Agent，再决定是扫码创建新机器人，还是填写已有机器人的 App ID / App Secret。
-                              </p>
+                  {setupStep !== "install" && dialogTab === "agent" && (
+                    <div className="grid gap-4 xl:grid-cols-[1.05fr_0.95fr]">
+                      <Card className="border-white/[0.08] bg-white/[0.02]">
+                        <CardContent className="space-y-4 p-4">
+                          <div className="space-y-1">
+                            <h4 className="text-[14px] font-semibold">绑定关系</h4>
+                            <p className="text-[12px] text-muted-foreground">
+                              先把这个飞书频道对应到一个 Agent，后面的扫码创建和已有机器人绑定都会直接使用这里的选择。
+                            </p>
+                          </div>
+
+                          <div className="space-y-1">
+                            <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">目标 Agent</label>
+                            <div className="relative">
+                              <Bot size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                              <select
+                                className={`${inputCls} appearance-none pl-9`}
+                                value={selectedAgentId}
+                                onChange={(event) => setSelectedAgentId(event.target.value)}
+                                disabled={Boolean(currentBoundAgentId) || existingBinding || unbindLoading || bindingPhase === "waiting" || bindingPhase === "finalizing" || installPhase === "running"}
+                              >
+                                <option value="">选择未绑定的 Agent</option>
+                                {selectedAgentOptions.map((agent) => (
+                                  <option key={agent.id} value={agent.id}>{agent.label}</option>
+                                ))}
+                              </select>
                             </div>
+                          </div>
 
-                            <Card className="border-white/[0.06] bg-white/[0.03]">
-                              <CardContent className="space-y-4 p-4">
-                                <div className="space-y-1">
-                                  <h5 className="text-[13px] font-semibold">绑定关系</h5>
-                                  <p className="text-[12px] text-muted-foreground">
-                                    一个飞书频道只对应一个 Agent，一个 Agent 也只允许绑定一个飞书频道。
-                                  </p>
-                                </div>
-
-                                <div className="space-y-1">
-                                  <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">目标 Agent</label>
-                                  <div className="relative">
-                                    <Bot size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                                    <select
-                                      className={`${inputCls} appearance-none pl-9`}
-                                      value={selectedAgentId}
-                                      onChange={(event) => setSelectedAgentId(event.target.value)}
-                                      disabled={Boolean(currentBoundAgentId) || existingBinding || unbindLoading || bindingPhase === "waiting" || bindingPhase === "finalizing" || installPhase === "running"}
-                                    >
-                                      <option value="">选择未绑定的 Agent</option>
-                                      {selectedAgentOptions.map((agent) => (
-                                        <option key={agent.id} value={agent.id}>{agent.label}</option>
-                                      ))}
-                                    </select>
-                                  </div>
-                                </div>
-
-                                {currentBoundAgentId ? (
-                                  <div className="rounded-xl border border-amber-500/15 bg-amber-500/8 p-3 text-[12px] text-amber-100/90">
-                                    当前频道已经绑定到 {currentBoundAgentLabel}。如果要改绑，请先解绑。
-                                  </div>
-                                ) : selectedAgentId ? (
-                                  <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/8 p-3 text-[12px] text-emerald-100/90">
-                                    当前会把这个飞书频道绑定到 {agentLabelById.get(selectedAgentId) || selectedAgentId}。
-                                  </div>
-                                ) : selectedAgentOptions.length === 0 ? (
-                                  <div className="rounded-xl border border-amber-500/15 bg-amber-500/8 p-3 text-[12px] text-amber-100/90">
-                                    现在没有可用的未绑定 Agent。请先在 Agents 页面创建 Agent，或者先解绑一个已占用的频道。
-                                  </div>
-                                ) : (
-                                  <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
-                                    先选定一个 Agent，然后继续扫码或填写已有机器人凭证。
-                                  </div>
-                                )}
-
-                                {editingAccountId && (
-                                  <div className="flex flex-wrap gap-2">
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => void loadFeishuBindingCatalog(editingAccountId)}
-                                      disabled={bindingCatalogLoading || existingBinding || unbindLoading || bindingPhase === "finalizing"}
-                                    >
-                                      {bindingCatalogLoading ? <Loader2 className="animate-spin" /> : <RefreshCw size={14} />}
-                                      刷新绑定关系
-                                    </Button>
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => void handleUnbindFeishu()}
-                                      disabled={!currentBoundAgentId || existingBinding || unbindLoading || bindingPhase === "finalizing"}
-                                    >
-                                      {unbindLoading ? <Loader2 className="animate-spin" /> : null}
-                                      {unbindLoading ? "解绑中..." : "解绑当前 Agent"}
-                                    </Button>
-                                  </div>
-                                )}
-                              </CardContent>
-                            </Card>
-
-                            {editingFeishuAccount && (
-                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
-                                <p>频道账号: {editingFeishuAccount.displayName || editingFeishuAccount.accountId}</p>
-                                <p className="mt-1">账号 ID: {editingFeishuAccount.accountId}</p>
-                                <p className="mt-1">当前 App ID: {editingFeishuAccount.appId || "尚未保存"}</p>
-                                <p className="mt-1">状态: {editingFeishuAccount.enabled ? "启用中" : "已停用"}</p>
-                              </div>
-                            )}
-
-                            <div className="grid gap-4 xl:grid-cols-2">
-                              <Card className="border-white/[0.06] bg-white/[0.03]">
-                                <CardContent className="space-y-4 p-4">
-                                  <div className="space-y-1">
-                                    <h5 className="text-[13px] font-semibold">扫码创建新机器人</h5>
-                                    <p className="text-[12px] text-muted-foreground">
-                                      应用内生成二维码，用飞书扫一扫后自动创建账号并绑定到上面选中的 Agent。
-                                    </p>
-                                  </div>
-
-                                  {bindingPhase === "waiting" && authQrDataUrl ? (
-                                    <div className="space-y-3">
-                                      <div className="rounded-2xl border border-sky-500/15 bg-sky-500/8 p-5 text-center">
-                                        <img src={authQrDataUrl} alt="飞书扫码二维码" className="mx-auto h-56 w-56 rounded-xl bg-white p-3" />
-                                        <p className="mt-3 text-[13px] font-medium text-sky-50">请用飞书扫一扫</p>
-                                        <p className="mt-1 text-[12px] text-sky-100/75">{bindingHint}</p>
-                                      </div>
-                                      <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
-                                        <p>二维码有效期约 {authSession ? formatRemainingSeconds(authSession.expireInSeconds) : "--"}，授权完成后这里会自动继续。</p>
-                                        <p className="mt-1">如果扫码后暂时没有变化，可以等待几秒，或者重新生成二维码。</p>
-                                      </div>
-                                    </div>
-                                  ) : (
-                                    <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-4 text-[12px] text-muted-foreground">
-                                      <p>{bindingHint || "准备好后点击下方按钮生成二维码。"}</p>
-                                    </div>
-                                  )}
-
-                                  <div className="flex flex-wrap gap-2">
-                                    <Button
-                                      size="sm"
-                                      onClick={() => void beginFeishuBinding()}
-                                      disabled={bindingPhase === "waiting" || bindingPhase === "finalizing" || existingBinding || unbindLoading || installPhase === "running" || !selectedAgentId.trim() || Boolean(currentBoundAgentId)}
-                                    >
-                                      {bindingPhase === "finalizing" ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
-                                      {bindingPhase === "waiting"
-                                        ? "等待扫码中..."
-                                        : bindingPhase === "finalizing"
-                                          ? "写入配置中..."
-                                          : currentBoundAgentId
-                                            ? "已绑定，请先解绑"
-                                            : !selectedAgentId.trim()
-                                              ? "先选择 Agent"
-                                              : "开始扫码创建"}
-                                    </Button>
-                                    {bindingPhase === "waiting" && (
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => {
-                                          setAuthSession(null);
-                                          setAuthQrDataUrl("");
-                                          setBindingPhase("idle");
-                                          setBindingError("");
-                                          setBindingHint("已取消本次扫码。你可以重新生成二维码，或改用已有机器人绑定。");
-                                        }}
-                                        disabled={existingBinding || unbindLoading}
-                                      >
-                                        取消扫码
-                                      </Button>
-                                    )}
-                                  </div>
-                                </CardContent>
-                              </Card>
-
-                              <Card className="border-white/[0.06] bg-white/[0.03]">
-                                <CardContent className="space-y-4 p-4">
-                                  <div className="space-y-1">
-                                    <h5 className="text-[13px] font-semibold">绑定已有机器人</h5>
-                                    <p className="text-[12px] text-muted-foreground">
-                                      直接输入已创建机器人的 App ID 和 App Secret，无需重新扫码创建，保存后会绑定到上面选中的 Agent。
-                                    </p>
-                                  </div>
-
-                                  <div className="space-y-3">
-                                    <div className="space-y-1">
-                                      <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">域名环境</label>
-                                      <div className="grid grid-cols-2 gap-2">
-                                        <Button
-                                          type="button"
-                                          size="sm"
-                                          variant="outline"
-                                          className={existingBindingForm.domain === "feishu"
-                                            ? "border-sky-400/40 bg-sky-500/15 text-sky-50 hover:bg-sky-500/20 hover:text-sky-50"
-                                            : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:bg-white/[0.04]"}
-                                          onClick={() => setExistingBindingForm((prev) => ({ ...prev, domain: "feishu" }))}
-                                          disabled={existingBinding || unbindLoading || bindingPhase === "finalizing"}
-                                        >
-                                          飞书
-                                        </Button>
-                                        <Button
-                                          type="button"
-                                          size="sm"
-                                          variant="outline"
-                                          className={existingBindingForm.domain === "lark"
-                                            ? "border-sky-400/40 bg-sky-500/15 text-sky-50 hover:bg-sky-500/20 hover:text-sky-50"
-                                            : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:bg-white/[0.04]"}
-                                          onClick={() => setExistingBindingForm((prev) => ({ ...prev, domain: "lark" }))}
-                                          disabled={existingBinding || unbindLoading || bindingPhase === "finalizing"}
-                                        >
-                                          Lark
-                                        </Button>
-                                      </div>
-                                    </div>
-
-                                    <div className="space-y-1">
-                                      <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">App ID</label>
-                                      <input
-                                        className={inputCls}
-                                        placeholder="cli_xxx"
-                                        value={existingBindingForm.appId}
-                                        onChange={(event) => setExistingBindingForm((prev) => ({ ...prev, appId: event.target.value }))}
-                                        disabled={existingBinding || unbindLoading || bindingPhase === "finalizing"}
-                                        autoCapitalize="off"
-                                        autoComplete="off"
-                                        spellCheck={false}
-                                      />
-                                    </div>
-
-                                    <div className="space-y-1">
-                                      <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">App Secret</label>
-                                      <input
-                                        type="password"
-                                        className={inputCls}
-                                        placeholder="填写已有机器人的 App Secret"
-                                        value={existingBindingForm.appSecret}
-                                        onChange={(event) => setExistingBindingForm((prev) => ({ ...prev, appSecret: event.target.value }))}
-                                        disabled={existingBinding || unbindLoading || bindingPhase === "finalizing"}
-                                        autoCapitalize="off"
-                                        autoComplete="off"
-                                        spellCheck={false}
-                                      />
-                                    </div>
-                                  </div>
-
-                                  <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
-                                    <p>如果你之前已经在飞书开放平台建好了机器人，这里直接填入凭证即可，不需要重新走扫码创建。</p>
-                                    <p className="mt-1">新建频道默认会用 App ID 作为频道账号 ID；编辑已有频道时会保留原来的账号 ID。</p>
-                                  </div>
-
-                                  <div className="flex flex-wrap gap-2">
-                                    <Button
-                                      size="sm"
-                                      onClick={() => void handleBindExistingFeishu()}
-                                      disabled={existingBinding || unbindLoading || bindingPhase === "finalizing" || installPhase === "running" || !selectedAgentId.trim() || Boolean(currentBoundAgentId) || !existingBindingForm.appId.trim() || !existingBindingForm.appSecret.trim()}
-                                    >
-                                      {existingBinding ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={14} />}
-                                      {existingBinding
-                                        ? "绑定中..."
-                                        : currentBoundAgentId
-                                          ? "已绑定，请先解绑"
-                                          : !selectedAgentId.trim()
-                                            ? "先选择 Agent"
-                                            : "保存并绑定"}
-                                    </Button>
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => setExistingBindingForm((prev) => ({ ...prev, appSecret: "" }))}
-                                      disabled={existingBinding || unbindLoading || bindingPhase === "finalizing" || !existingBindingForm.appSecret}
-                                    >
-                                      清空密钥
-                                    </Button>
-                                  </div>
-                                </CardContent>
-                              </Card>
+                          {currentBoundAgentId ? (
+                            <div className="rounded-xl border border-amber-500/15 bg-amber-500/8 p-3 text-[12px] text-amber-100/90">
+                              当前频道已经绑定到 {currentBoundAgentLabel}。如果要改绑，请先解绑。
                             </div>
+                          ) : selectedAgentId ? (
+                            <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/8 p-3 text-[12px] text-emerald-100/90">
+                              当前会把这个飞书频道绑定到 {agentLabelById.get(selectedAgentId) || selectedAgentId}。
+                            </div>
+                          ) : selectedAgentOptions.length === 0 ? (
+                            <div className="rounded-xl border border-amber-500/15 bg-amber-500/8 p-3 text-[12px] text-amber-100/90">
+                              现在没有可用的未绑定 Agent。请先在 Agents 页面创建 Agent，或者先解绑一个已占用的频道。
+                            </div>
+                          ) : (
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
+                              选好 Agent 后，再切到“扫码创建”或“已有机器人”继续。
+                            </div>
+                          )}
 
+                          {editingAccountId && (
                             <div className="flex flex-wrap gap-2">
-                              <Button size="sm" variant="outline" onClick={() => void refreshAll()} disabled={bindingPhase === "finalizing" || existingBinding || unbindLoading}>
-                                <RefreshCw size={14} />
-                                刷新频道列表
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void loadFeishuBindingCatalog(editingAccountId)}
+                                disabled={bindingCatalogLoading || existingBinding || unbindLoading || bindingPhase === "finalizing"}
+                              >
+                                {bindingCatalogLoading ? <Loader2 className="animate-spin" /> : <RefreshCw size={14} />}
+                                刷新绑定关系
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void handleUnbindFeishu()}
+                                disabled={!currentBoundAgentId || existingBinding || unbindLoading || bindingPhase === "finalizing"}
+                              >
+                                {unbindLoading ? <Loader2 className="animate-spin" /> : null}
+                                {unbindLoading ? "解绑中..." : "解绑当前 Agent"}
                               </Button>
                             </div>
-                          </CardContent>
-                        </Card>
-
-                        <Card className="border-white/[0.08] bg-white/[0.02]">
-                          <CardContent className="space-y-4 p-4">
-                            <div className="space-y-1">
-                              <h4 className="text-[13px] font-semibold">当前状态</h4>
-                              <p className="text-[12px] text-muted-foreground">这里会根据插件检测、绑定和解绑结果实时更新。</p>
-                            </div>
-
-                            <div className="space-y-3 text-[12px]">
-                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
-                                <p className="text-muted-foreground">官方插件</p>
-                                <p className="mt-1 font-medium text-foreground">{feishuStatus?.officialPluginInstalled ? "已安装" : "未安装"}</p>
-                              </div>
-                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
-                                <p className="text-muted-foreground">官方插件状态</p>
-                                <p className="mt-1 font-medium text-foreground">{feishuStatus?.officialPluginEnabled ? "已启用" : "待启用"}</p>
-                              </div>
-                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
-                                <p className="text-muted-foreground">当前频道</p>
-                                <p className="mt-1 font-medium text-foreground">{editingAccountId || "新建频道"}</p>
-                              </div>
-                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
-                                <p className="text-muted-foreground">当前 Agent</p>
-                                <p className="mt-1 font-medium text-foreground">
-                                  {currentBoundAgentLabel || (selectedAgentId ? (agentLabelById.get(selectedAgentId) || selectedAgentId) : "尚未选择")}
-                                </p>
-                              </div>
-                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
-                                <p className="text-muted-foreground">绑定状态</p>
-                                <p className="mt-1 font-medium text-foreground">
-                                  {unbindLoading
-                                    ? "解绑中"
-                                    : existingBinding
-                                      ? "校验已有机器人"
-                                      : bindingPhase === "done"
-                                      ? "已完成"
-                                      : bindingPhase === "finalizing"
-                                        ? "写入配置中"
-                                        : bindingPhase === "waiting"
-                                          ? "等待扫码"
-                                          : currentBoundAgentId
-                                            ? "已绑定"
-                                            : "尚未开始"}
-                                </p>
-                              </div>
-                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
-                                <p className="text-muted-foreground">已接入频道数</p>
-                                <p className="mt-1 font-medium text-foreground">{feishuBindingCatalog?.accounts.length ?? 0}</p>
-                              </div>
-                              {feishuStatus?.communityPluginEnabled && (
-                                <div className="rounded-xl border border-amber-500/15 bg-amber-500/8 p-3 text-amber-100/85">
-                                  检测到旧的社区飞书插件仍配置为启用状态。应用内绑定会自动优先启用官方插件。
-                                </div>
-                              )}
-                            </div>
-                          </CardContent>
-                        </Card>
-                      </div>
+                          )}
+                        </CardContent>
+                      </Card>
 
                       <Card className="border-white/[0.08] bg-white/[0.02]">
                         <CardContent className="space-y-4 p-4">
                           <div className="space-y-1">
-                            <h4 className="text-[13px] font-semibold">现在的规则</h4>
-                            <p className="text-[12px] text-muted-foreground">
-                              复杂的匹配范围、多 Agent 路由和顺序命中已经从这个页面拿掉了。这里现在只保留最直接的绑定关系。
-                            </p>
+                            <h4 className="text-[13px] font-semibold">当前频道</h4>
+                            <p className="text-[12px] text-muted-foreground">这里集中看当前账号、Agent 和绑定状态。</p>
+                          </div>
+
+                          <div className="grid gap-3 sm:grid-cols-2 text-[12px]">
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">频道账号</p>
+                              <p className="mt-1 font-medium text-foreground">{editingFeishuAccount?.displayName || editingAccountId || "新建频道"}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">账号 ID</p>
+                              <p className="mt-1 font-medium text-foreground">{editingFeishuAccount?.accountId || "待生成"}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">当前 App ID</p>
+                              <p className="mt-1 font-medium text-foreground">{editingFeishuAccount?.appId || existingBindingForm.appId || "尚未保存"}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">绑定状态</p>
+                              <p className="mt-1 font-medium text-foreground">{bindingStatusLabel}</p>
+                            </div>
+                          </div>
+
+                          <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
+                            <p>当前 Agent：{currentBoundAgentLabel || (selectedAgentId ? (agentLabelById.get(selectedAgentId) || selectedAgentId) : "尚未选择")}</p>
+                            <p className="mt-1">可选未绑定 Agent：{selectedAgentOptions.length}</p>
+                          </div>
+
+                          <div className="flex flex-wrap gap-2">
+                            <Button size="sm" variant="outline" onClick={() => void refreshAll()} disabled={bindingPhase === "finalizing" || existingBinding || unbindLoading}>
+                              <RefreshCw size={14} />
+                              刷新频道列表
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    </div>
+                  )}
+
+                  {setupStep !== "install" && dialogTab === "qr" && (
+                    <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+                      <Card className="border-white/[0.08] bg-white/[0.02]">
+                        <CardContent className="space-y-4 p-4">
+                          <div className="space-y-1">
+                            <h4 className="text-[14px] font-semibold">扫码创建</h4>
+                            <p className="text-[12px] text-muted-foreground">在这里生成二维码，用飞书扫一扫后自动创建并绑定到当前选中的 Agent。</p>
+                          </div>
+
+                          {bindingPhase === "waiting" && authQrDataUrl ? (
+                            <div className="space-y-3">
+                              <div className="rounded-2xl border border-sky-500/15 bg-sky-500/8 p-5 text-center">
+                                <img src={authQrDataUrl} alt="飞书扫码二维码" className="mx-auto h-56 w-56 rounded-xl bg-white p-3" />
+                                <p className="mt-3 text-[13px] font-medium text-sky-50">请用飞书扫一扫</p>
+                                <p className="mt-1 text-[12px] text-sky-100/75">{bindingHint}</p>
+                              </div>
+                              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
+                                <p>二维码有效期约 {authSession ? formatRemainingSeconds(authSession.expireInSeconds) : "--"}，授权完成后这里会自动继续。</p>
+                                <p className="mt-1">如果扫码后暂时没有变化，可以等待几秒，或者重新生成二维码。</p>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-4 text-[12px] text-muted-foreground">
+                              <p>{bindingHint || "准备好后点击下方按钮生成二维码。"}</p>
+                            </div>
+                          )}
+
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              size="sm"
+                              onClick={() => void beginFeishuBinding()}
+                              disabled={bindingPhase === "waiting" || bindingPhase === "finalizing" || existingBinding || unbindLoading || installPhase === "running" || !selectedAgentId.trim() || Boolean(currentBoundAgentId)}
+                            >
+                              {bindingPhase === "finalizing" ? <Loader2 className="animate-spin" /> : <Plus size={14} />}
+                              {bindingPhase === "waiting"
+                                ? "等待扫码中..."
+                                : bindingPhase === "finalizing"
+                                  ? "写入配置中..."
+                                  : currentBoundAgentId
+                                    ? "已绑定，请先解绑"
+                                    : !selectedAgentId.trim()
+                                      ? "先选择 Agent"
+                                      : "开始扫码创建"}
+                            </Button>
+                            {bindingPhase === "waiting" && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => {
+                                  setAuthSession(null);
+                                  setAuthQrDataUrl("");
+                                  setBindingPhase("idle");
+                                  setBindingError("");
+                                  setBindingHint("已取消本次扫码。你可以重新生成二维码，或改用已有机器人绑定。");
+                                }}
+                                disabled={existingBinding || unbindLoading}
+                              >
+                                取消扫码
+                              </Button>
+                            )}
+                          </div>
+                        </CardContent>
+                      </Card>
+
+                      <Card className="border-white/[0.08] bg-white/[0.02]">
+                        <CardContent className="space-y-4 p-4">
+                          <div className="space-y-1">
+                            <h4 className="text-[13px] font-semibold">当前上下文</h4>
+                            <p className="text-[12px] text-muted-foreground">扫码前先确认目标频道和 Agent 没问题。</p>
+                          </div>
+
+                          <div className="space-y-3 text-[12px]">
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">目标 Agent</p>
+                              <p className="mt-1 font-medium text-foreground">{selectedAgentId ? (agentLabelById.get(selectedAgentId) || selectedAgentId) : "尚未选择"}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">当前频道</p>
+                              <p className="mt-1 font-medium text-foreground">{editingFeishuAccount?.displayName || editingAccountId || "新建频道"}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">扫码状态</p>
+                              <p className="mt-1 font-medium text-foreground">{bindingStatusLabel}</p>
+                            </div>
+                          </div>
+
+                          {currentBoundAgentId ? (
+                            <div className="rounded-xl border border-amber-500/15 bg-amber-500/8 p-3 text-[12px] text-amber-100/90">
+                              当前频道已经绑定到 {currentBoundAgentLabel}。如果要重新扫码绑定，请先回到“绑定关系”里解绑。
+                            </div>
+                          ) : !selectedAgentId.trim() ? (
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
+                              还没选 Agent。先去“绑定关系”标签里选好目标 Agent，再回来扫码。
+                            </div>
+                          ) : null}
+                        </CardContent>
+                      </Card>
+                    </div>
+                  )}
+
+                  {setupStep !== "install" && dialogTab === "existing" && (
+                    <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+                      <Card className="border-white/[0.08] bg-white/[0.02]">
+                        <CardContent className="space-y-4 p-4">
+                          <div className="space-y-1">
+                            <h4 className="text-[14px] font-semibold">已有机器人</h4>
+                            <p className="text-[12px] text-muted-foreground">如果你已经在飞书开放平台建好了机器人，这里直接填入凭证即可。</p>
+                          </div>
+
+                          <div className="space-y-3">
+                            <div className="space-y-1">
+                              <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">域名环境</label>
+                              <div className="grid grid-cols-2 gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  className={existingBindingForm.domain === "feishu"
+                                    ? "border-sky-400/40 bg-sky-500/15 text-sky-50 hover:bg-sky-500/20 hover:text-sky-50"
+                                    : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:bg-white/[0.04]"}
+                                  onClick={() => setExistingBindingForm((prev) => ({ ...prev, domain: "feishu" }))}
+                                  disabled={existingBinding || unbindLoading || bindingPhase === "finalizing"}
+                                >
+                                  飞书
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  className={existingBindingForm.domain === "lark"
+                                    ? "border-sky-400/40 bg-sky-500/15 text-sky-50 hover:bg-sky-500/20 hover:text-sky-50"
+                                    : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:bg-white/[0.04]"}
+                                  onClick={() => setExistingBindingForm((prev) => ({ ...prev, domain: "lark" }))}
+                                  disabled={existingBinding || unbindLoading || bindingPhase === "finalizing"}
+                                >
+                                  Lark
+                                </Button>
+                              </div>
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">App ID</label>
+                              <input
+                                className={inputCls}
+                                placeholder="cli_xxx"
+                                value={existingBindingForm.appId}
+                                onChange={(event) => setExistingBindingForm((prev) => ({ ...prev, appId: event.target.value }))}
+                                disabled={existingBinding || unbindLoading || bindingPhase === "finalizing"}
+                                autoCapitalize="off"
+                                autoComplete="off"
+                                spellCheck={false}
+                              />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">App Secret</label>
+                              <input
+                                type="password"
+                                className={inputCls}
+                                placeholder="填写已有机器人的 App Secret"
+                                value={existingBindingForm.appSecret}
+                                onChange={(event) => setExistingBindingForm((prev) => ({ ...prev, appSecret: event.target.value }))}
+                                disabled={existingBinding || unbindLoading || bindingPhase === "finalizing"}
+                                autoCapitalize="off"
+                                autoComplete="off"
+                                spellCheck={false}
+                              />
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              size="sm"
+                              onClick={() => void handleBindExistingFeishu()}
+                              disabled={existingBinding || unbindLoading || bindingPhase === "finalizing" || installPhase === "running" || !selectedAgentId.trim() || Boolean(currentBoundAgentId) || !existingBindingForm.appId.trim() || !existingBindingForm.appSecret.trim()}
+                            >
+                              {existingBinding ? <Loader2 className="animate-spin" /> : <CheckCircle2 size={14} />}
+                              {existingBinding
+                                ? "绑定中..."
+                                : currentBoundAgentId
+                                  ? "已绑定，请先解绑"
+                                  : !selectedAgentId.trim()
+                                    ? "先选择 Agent"
+                                    : "保存并绑定"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => setExistingBindingForm((prev) => ({ ...prev, appSecret: "" }))}
+                              disabled={existingBinding || unbindLoading || bindingPhase === "finalizing" || !existingBindingForm.appSecret}
+                            >
+                              清空密钥
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+
+                      <Card className="border-white/[0.08] bg-white/[0.02]">
+                        <CardContent className="space-y-4 p-4">
+                          <div className="space-y-1">
+                            <h4 className="text-[13px] font-semibold">填写前确认</h4>
+                            <p className="text-[12px] text-muted-foreground">这里保留和当前绑定最相关的上下文，避免来回翻看。</p>
+                          </div>
+
+                          <div className="space-y-3 text-[12px]">
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">目标 Agent</p>
+                              <p className="mt-1 font-medium text-foreground">{selectedAgentId ? (agentLabelById.get(selectedAgentId) || selectedAgentId) : "尚未选择"}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">当前频道</p>
+                              <p className="mt-1 font-medium text-foreground">{editingFeishuAccount?.displayName || editingAccountId || "新建频道"}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">账号 ID</p>
+                              <p className="mt-1 font-medium text-foreground">{editingFeishuAccount?.accountId || "默认使用 App ID"}</p>
+                            </div>
+                          </div>
+
+                          <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] text-muted-foreground">
+                            <p>新建频道默认会用 App ID 作为频道账号 ID；编辑已有频道时会保留原来的账号 ID。</p>
+                            <p className="mt-1">如果当前频道已经绑定 Agent，需要先去“绑定关系”标签里解绑，才能重新写入新的机器人凭证。</p>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    </div>
+                  )}
+
+                  {dialogTab === "status" && (
+                    <div className="grid gap-4 lg:grid-cols-[1fr_0.95fr]">
+                      <Card className="border-white/[0.08] bg-white/[0.02]">
+                        <CardContent className="space-y-4 p-4">
+                          <div className="space-y-1">
+                            <h4 className="text-[13px] font-semibold">当前状态</h4>
+                            <p className="text-[12px] text-muted-foreground">这里汇总插件、频道和绑定进度，方便快速判断现在卡在哪一步。</p>
+                          </div>
+
+                          <div className="grid gap-3 sm:grid-cols-2 text-[12px]">
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">官方插件</p>
+                              <p className="mt-1 font-medium text-foreground">{feishuStatus?.officialPluginInstalled ? "已安装" : "未安装"}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">官方插件状态</p>
+                              <p className="mt-1 font-medium text-foreground">{feishuStatus?.officialPluginEnabled ? "已启用" : "待启用"}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">当前频道</p>
+                              <p className="mt-1 font-medium text-foreground">{editingAccountId || "新建频道"}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">当前 Agent</p>
+                              <p className="mt-1 font-medium text-foreground">
+                                {currentBoundAgentLabel || (selectedAgentId ? (agentLabelById.get(selectedAgentId) || selectedAgentId) : "尚未选择")}
+                              </p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">绑定状态</p>
+                              <p className="mt-1 font-medium text-foreground">{bindingStatusLabel}</p>
+                            </div>
+                            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-3">
+                              <p className="text-muted-foreground">已接入飞书频道</p>
+                              <p className="mt-1 font-medium text-foreground">{feishuBindingCatalog?.accounts.length ?? 0}</p>
+                            </div>
+                          </div>
+
+                          {feishuStatus?.communityPluginEnabled && (
+                            <div className="rounded-xl border border-amber-500/15 bg-amber-500/8 p-3 text-[12px] text-amber-100/85">
+                              检测到旧的社区飞书插件仍配置为启用状态。应用内绑定会自动优先启用官方插件。
+                            </div>
+                          )}
+                        </CardContent>
+                      </Card>
+
+                      <Card className="border-white/[0.08] bg-white/[0.02]">
+                        <CardContent className="space-y-4 p-4">
+                          <div className="space-y-1">
+                            <h4 className="text-[13px] font-semibold">当前规则</h4>
+                            <p className="text-[12px] text-muted-foreground">弹窗里只保留和单频道绑定最相关的规则，不再混入旧的多路由配置。</p>
                           </div>
 
                           <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-4 text-[12px] text-muted-foreground">
                             <p>1. 一个飞书频道只能绑定一个 Agent。</p>
                             <p className="mt-1">2. 一个 Agent 也只能绑定一个飞书频道。</p>
-                            <p className="mt-1">3. 已绑定的频道不会再被新扫码结果顶掉；如果要换绑，必须先解绑。</p>
+                            <p className="mt-1">3. 如果要换绑，先在“绑定关系”里解绑，再重新扫码或填写已有机器人。</p>
+                          </div>
+
+                          <div className="flex flex-wrap gap-2">
+                            <Button size="sm" variant="outline" onClick={() => void refreshAll()} disabled={bindingPhase === "finalizing" || existingBinding || unbindLoading}>
+                              <RefreshCw size={14} />
+                              刷新频道列表
+                            </Button>
+                            {editingAccountId && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void loadFeishuBindingCatalog(editingAccountId)}
+                                disabled={bindingCatalogLoading || existingBinding || unbindLoading || bindingPhase === "finalizing"}
+                              >
+                                {bindingCatalogLoading ? <Loader2 className="animate-spin" /> : <RefreshCw size={14} />}
+                                刷新绑定关系
+                              </Button>
+                            )}
                           </div>
                         </CardContent>
                       </Card>
