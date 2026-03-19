@@ -128,6 +128,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   const [securityAudit, setSecurityAudit] = useState<SecurityAuditSnapshot | null>(null);
   const [configuredPrimaryModel, setConfiguredPrimaryModel] = useState<string | null>(null);
   const [openingDashboard, setOpeningDashboard] = useState(false);
+  const [configuredChannelCount, setConfiguredChannelCount] = useState(0);
 
   const checkGateway = useCallback(async () => {
     try {
@@ -143,15 +144,17 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
     const errors: string[] = [];
 
     try {
-      const [gatewayResult, runtimeResult, auditResult] = await Promise.allSettled([
+      const [gatewayResult, runtimeResult, auditResult, channelsResult] = await Promise.allSettled([
         invoke<CommandResult>("get_gateway_status_snapshot"),
         invoke<CommandResult>("get_runtime_status_snapshot"),
         invoke<CommandResult>("get_security_audit_snapshot"),
+        invoke<CommandResult>("list_channels_snapshot"),
       ]);
 
       let nextGateway: GatewaySnapshot | null = null;
       let nextRuntime: RuntimeSnapshot | null = null;
       let nextAudit: SecurityAuditSnapshot | null = null;
+      let nextConfiguredChannelCount = 0;
 
       if (gatewayResult.status === "fulfilled") {
         nextGateway = parseJsonResult<GatewaySnapshot>(gatewayResult.value);
@@ -180,6 +183,10 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
         errors.push("安全提醒获取失败");
       }
 
+      if (channelsResult.status === "fulfilled") {
+        nextConfiguredChannelCount = countConfiguredChannelsFromSnapshot(channelsResult.value);
+      }
+
       if (nextGateway) {
         setGatewaySnapshot(nextGateway);
       }
@@ -189,6 +196,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
       if (nextAudit || nextRuntime?.securityAudit) {
         setSecurityAudit(nextAudit ?? nextRuntime?.securityAudit ?? null);
       }
+      setConfiguredChannelCount(nextConfiguredChannelCount);
 
       if (nextGateway?.rpc?.ok === false) {
         setGwMessage(firstMeaningfulLine(nextGateway.rpc.error) ?? "网关已启动，但控制面板暂时连不上");
@@ -348,7 +356,8 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   const gatewayServiceLabel = runtimeSnapshot?.gatewayService?.runtimeShort
     ?? gatewaySnapshot?.service?.runtime?.status
     ?? (gwStatus === "running" ? "running" : "stopped");
-  const channelCount = runtimeSnapshot?.channelSummary?.length ?? 0;
+  const runtimeChannelCount = runtimeSnapshot?.channelSummary?.length ?? 0;
+  const channelCount = Math.max(runtimeChannelCount, configuredChannelCount);
   const defaultModel = configuredPrimaryModel
     ?? runtimeSnapshot?.sessions?.defaults?.model
     ?? runtimeSnapshot?.sessions?.recent?.[0]?.model
@@ -825,6 +834,43 @@ function firstMeaningfulLine(text?: string | null) {
     .split("\n")
     .map((line) => line.trim())
     .find(Boolean) ?? null;
+}
+
+function countConfiguredChannelsFromSnapshot(result: CommandResult) {
+  if (!result.success || !result.stdout.trim()) {
+    return 0;
+  }
+
+  let payload: Record<string, unknown> | null = null;
+  try {
+    payload = JSON.parse(result.stdout) as Record<string, unknown>;
+  } catch {
+    return 0;
+  }
+
+  const chat = payload.chat;
+  if (!chat || typeof chat !== "object" || Array.isArray(chat)) {
+    return 0;
+  }
+
+  let count = 0;
+  for (const accounts of Object.values(chat as Record<string, unknown>)) {
+    if (!accounts || typeof accounts !== "object" || Array.isArray(accounts)) {
+      continue;
+    }
+
+    for (const account of Object.values(accounts as Record<string, unknown>)) {
+      if (!account || typeof account !== "object" || Array.isArray(account)) {
+        continue;
+      }
+      const enabled = (account as Record<string, unknown>).enabled;
+      if (enabled !== false) {
+        count += 1;
+      }
+    }
+  }
+
+  return count;
 }
 
 function getPathTail(path?: string | null) {
