@@ -3972,30 +3972,6 @@ struct SkillOriginRecord {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct OpenClawSkillsListResponse {
-    workspace_dir: String,
-    managed_skills_dir: String,
-    skills: Vec<OpenClawSkillCatalogRecord>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenClawSkillCatalogRecord {
-    name: String,
-    description: String,
-    emoji: Option<String>,
-    eligible: bool,
-    disabled: bool,
-    blocked_by_allowlist: bool,
-    source: String,
-    bundled: bool,
-    homepage: Option<String>,
-    #[serde(default)]
-    missing: SkillRequirementState,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct OpenClawSkillsCheckResponse {
     summary: OpenClawSkillsCheckSummary,
     #[serde(default)]
@@ -4059,8 +4035,21 @@ struct SkillMarkdownMetadataRecord {
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct SkillMarkdownOpenClawMetadataRecord {
+    emoji: Option<String>,
+    #[serde(default)]
+    os: Vec<String>,
+    #[serde(default)]
+    requires: SkillRequirementState,
     #[serde(default)]
     install: Vec<SkillInstallRecipe>,
+}
+
+#[derive(Debug, Default)]
+struct SkillMarkdownSummary {
+    name: String,
+    description: String,
+    homepage: Option<String>,
+    metadata: SkillMarkdownOpenClawMetadataRecord,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -4182,15 +4171,277 @@ fn extract_braced_json_after_marker(content: &str, marker: &str) -> Option<Strin
     None
 }
 
+fn extract_frontmatter_block(content: &str) -> Option<String> {
+    let mut lines = content.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+
+    let mut block = String::new();
+    for line in lines {
+        if line.trim() == "---" {
+            return Some(block);
+        }
+        if !block.is_empty() {
+            block.push('\n');
+        }
+        block.push_str(line);
+    }
+
+    None
+}
+
+fn trim_frontmatter_scalar(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+    {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn extract_frontmatter_scalar(content: &str, key: &str) -> Option<String> {
+    let prefix = format!("{}:", key);
+    let frontmatter = extract_frontmatter_block(content)?;
+
+    frontmatter
+        .lines()
+        .map(str::trim)
+        .find_map(|line| {
+            line.strip_prefix(&prefix)
+                .map(trim_frontmatter_scalar)
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn parse_skill_markdown_metadata_from_content(
+    content: &str,
+) -> Result<SkillMarkdownMetadataRecord, String> {
+    let raw_metadata = extract_braced_json_after_marker(content, "metadata:")
+        .ok_or_else(|| "metadata 不存在或格式不受支持".to_string())?;
+    let normalized = strip_json_like_trailing_commas(&raw_metadata);
+    serde_json::from_str::<SkillMarkdownMetadataRecord>(&normalized)
+        .map_err(|error| format!("metadata 解析失败: {}", error))
+}
+
+fn parse_skill_markdown_summary(
+    skill_path: &Path,
+    fallback_name: &str,
+) -> Result<SkillMarkdownSummary, String> {
+    let content = std::fs::read_to_string(skill_path)
+        .map_err(|error| format!("无法读取 {}: {}", skill_path.display(), error))?;
+    let metadata = parse_skill_markdown_metadata_from_content(&content)
+        .ok()
+        .and_then(|record| record.openclaw)
+        .unwrap_or_default();
+
+    Ok(SkillMarkdownSummary {
+        name: extract_frontmatter_scalar(&content, "name")
+            .unwrap_or_else(|| fallback_name.to_string()),
+        description: extract_frontmatter_scalar(&content, "description").unwrap_or_default(),
+        homepage: extract_frontmatter_scalar(&content, "homepage"),
+        metadata,
+    })
+}
+
+fn resolve_openclaw_skills_dir(source: &str) -> Option<PathBuf> {
+    match source {
+        "openclaw-bundled" => resolve_openclaw_package_root().map(|root| root.join("skills")),
+        "openclaw-workspace" => Some(
+            PathBuf::from(get_openclaw_home())
+                .join("workspace")
+                .join("skills"),
+        ),
+        _ => None,
+    }
+    .filter(|path| path.is_dir())
+}
+
+fn normalize_skill_identity(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn build_managed_skill_lookup(managed_skills: &[SkillInfo]) -> BTreeMap<String, SkillInfo> {
+    let mut lookup = BTreeMap::new();
+
+    for skill in managed_skills {
+        let name_key = normalize_skill_identity(&skill.name);
+        if !name_key.is_empty() {
+            lookup.entry(name_key).or_insert_with(|| skill.clone());
+        }
+
+        if let Some(origin_slug) = skill.origin_slug.as_deref() {
+            let slug_key = normalize_skill_identity(origin_slug);
+            if !slug_key.is_empty() {
+                lookup.entry(slug_key).or_insert_with(|| skill.clone());
+            }
+        }
+    }
+
+    lookup
+}
+
+fn config_path_satisfied(config: &serde_json::Value, dotted_path: &str) -> bool {
+    let mut current = config;
+
+    for segment in dotted_path.split('.').map(str::trim).filter(|value| !value.is_empty()) {
+        let Some(next) = current.get(segment) else {
+            return false;
+        };
+        current = next;
+    }
+
+    match current {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(flag) => *flag,
+        serde_json::Value::Number(_) => true,
+        serde_json::Value::String(text) => !text.trim().is_empty(),
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::Object(entries) => !entries.is_empty(),
+    }
+}
+
+fn current_os_supported(allowed_os: &[String]) -> bool {
+    allowed_os.is_empty()
+        || allowed_os
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(current_openclaw_os_tag()))
+}
+
+fn build_skill_requirement_state(
+    config: &serde_json::Value,
+    metadata: &SkillMarkdownOpenClawMetadataRecord,
+) -> SkillRequirementState {
+    let mut missing = SkillRequirementState::default();
+
+    if !current_os_supported(&metadata.os) {
+        missing.os = metadata.os.clone();
+    }
+
+    for bin in &metadata.requires.bins {
+        if !command_exists(bin) {
+            missing.bins.push(bin.clone());
+        }
+    }
+
+    if !metadata.requires.any_bins.is_empty()
+        && !metadata
+            .requires
+            .any_bins
+            .iter()
+            .any(|bin| command_exists(bin))
+    {
+        missing.any_bins = metadata.requires.any_bins.clone();
+    }
+
+    for env_name in &metadata.requires.env {
+        let present = std::env::var(env_name)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+        if !present {
+            missing.env.push(env_name.clone());
+        }
+    }
+
+    for config_key in &metadata.requires.config {
+        if !config_path_satisfied(config, config_key) {
+            missing.config.push(config_key.clone());
+        }
+    }
+
+    missing
+}
+
+fn collect_skill_install_hints(recipes: &[SkillInstallRecipe]) -> Vec<SkillInstallHint> {
+    recipes
+        .iter()
+        .filter(|recipe| current_os_supported(&recipe.os))
+        .map(|recipe| SkillInstallHint {
+            id: recipe.id.clone(),
+            kind: recipe.kind.clone(),
+            label: recipe.label.clone(),
+            bins: recipe.bins.clone(),
+        })
+        .collect()
+}
+
+fn collect_openclaw_skills_from_dir(
+    dir: &Path,
+    source: &str,
+    managed_lookup: &BTreeMap<String, SkillInfo>,
+    config: &serde_json::Value,
+    warnings: &mut Vec<String>,
+) -> Vec<OpenClawSkillInfo> {
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+
+    let mut skills = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        warnings.push(format!("无法读取 Skills 目录 {}", dir.display()));
+        return skills;
+    };
+
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if !entry_path.is_dir() {
+            continue;
+        }
+
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let skill_path = entry_path.join("SKILL.md");
+        if !skill_path.is_file() {
+            continue;
+        }
+
+        let summary = match parse_skill_markdown_summary(&skill_path, &dir_name) {
+            Ok(value) => value,
+            Err(error) => {
+                warnings.push(error);
+                continue;
+            }
+        };
+        let missing = build_skill_requirement_state(config, &summary.metadata);
+        let display_key = normalize_skill_identity(&summary.name);
+        let dir_key = normalize_skill_identity(&dir_name);
+        let managed_skill = managed_lookup
+            .get(&display_key)
+            .or_else(|| managed_lookup.get(&dir_key));
+
+        skills.push(OpenClawSkillInfo {
+            name: summary.name,
+            description: summary.description,
+            emoji: summary.metadata.emoji.clone(),
+            eligible: missing.is_empty(),
+            disabled: false,
+            blocked_by_allowlist: false,
+            source: source.to_string(),
+            bundled: source == "openclaw-bundled",
+            homepage: summary.homepage,
+            missing,
+            install_hints: collect_skill_install_hints(&summary.metadata.install),
+            managed_installed: managed_skill.is_some(),
+            managed_version: managed_skill.and_then(|skill| {
+                skill.installed_version.clone().or_else(|| {
+                    (skill.version != "unknown").then(|| skill.version.clone())
+                })
+            }),
+            managed_path: managed_skill.map(|skill| skill.path.clone()),
+        });
+    }
+
+    skills
+}
+
 fn parse_skill_install_recipes_from_markdown(
     skill_path: &Path,
 ) -> Result<Vec<SkillInstallRecipe>, String> {
     let content = std::fs::read_to_string(skill_path)
         .map_err(|error| format!("无法读取 {}: {}", skill_path.display(), error))?;
-    let raw_metadata = extract_braced_json_after_marker(&content, "metadata:")
-        .ok_or_else(|| format!("{} 内没有可解析的 metadata", skill_path.display()))?;
-    let normalized = strip_json_like_trailing_commas(&raw_metadata);
-    let metadata = serde_json::from_str::<SkillMarkdownMetadataRecord>(&normalized)
+    let metadata = parse_skill_markdown_metadata_from_content(&content)
         .map_err(|error| format!("解析 {} metadata 失败: {}", skill_path.display(), error))?;
 
     Ok(metadata
@@ -4824,58 +5075,31 @@ fn build_skills_dashboard_snapshot() -> SkillsDashboardSnapshot {
     let managed_skills = collect_managed_skills();
     let managed_dir = format!("{}/skills", get_openclaw_home());
     let workspace_dir = format!("{}/workspace", get_openclaw_home());
+    let config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
     let mut warnings = Vec::new();
+    let managed_lookup = build_managed_skill_lookup(&managed_skills);
 
-    let list_args = vec![
-        "skills".to_string(),
-        "list".to_string(),
-        "--json".to_string(),
-    ];
-    let list_payload = parse_command_json::<OpenClawSkillsListResponse>(
-        run_openclaw_args_timeout(&list_args, Duration::from_secs(20)),
-        "读取 OpenClaw skills 列表失败",
-    )
-    .map_err(|error| warnings.push(error))
-    .ok();
-
-    let managed_map = managed_skills
-        .iter()
-        .cloned()
-        .map(|skill| (skill.name.clone(), skill))
-        .collect::<BTreeMap<_, _>>();
-
-    let mut openclaw_skills = list_payload
-        .as_ref()
-        .map(|payload| {
-            payload
-                .skills
-                .iter()
-                .map(|entry| {
-                    let managed_skill = managed_map.get(&entry.name);
-                    OpenClawSkillInfo {
-                        name: entry.name.clone(),
-                        description: entry.description.clone(),
-                        emoji: entry.emoji.clone(),
-                        eligible: entry.eligible,
-                        disabled: entry.disabled,
-                        blocked_by_allowlist: entry.blocked_by_allowlist,
-                        source: entry.source.clone(),
-                        bundled: entry.bundled,
-                        homepage: entry.homepage.clone(),
-                        missing: entry.missing.clone(),
-                        install_hints: Vec::new(),
-                        managed_installed: managed_skill.is_some(),
-                        managed_version: managed_skill.and_then(|skill| {
-                            skill.installed_version.clone().or_else(|| {
-                                (skill.version != "unknown").then(|| skill.version.clone())
-                            })
-                        }),
-                        managed_path: managed_skill.map(|skill| skill.path.clone()),
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let mut openclaw_skills = Vec::new();
+    if let Some(bundled_dir) = resolve_openclaw_skills_dir("openclaw-bundled") {
+        openclaw_skills.extend(collect_openclaw_skills_from_dir(
+            &bundled_dir,
+            "openclaw-bundled",
+            &managed_lookup,
+            &config,
+            &mut warnings,
+        ));
+    } else {
+        warnings.push("未找到 OpenClaw 自带 Skills 目录".to_string());
+    }
+    if let Some(workspace_skills_dir) = resolve_openclaw_skills_dir("openclaw-workspace") {
+        openclaw_skills.extend(collect_openclaw_skills_from_dir(
+            &workspace_skills_dir,
+            "openclaw-workspace",
+            &managed_lookup,
+            &config,
+            &mut warnings,
+        ));
+    }
 
     openclaw_skills.sort_by(|left, right| {
         right
@@ -4886,17 +5110,15 @@ fn build_skills_dashboard_snapshot() -> SkillsDashboardSnapshot {
     });
 
     SkillsDashboardSnapshot {
-        workspace_dir: list_payload
-            .as_ref()
-            .map(|payload| payload.workspace_dir.clone())
-            .unwrap_or(workspace_dir),
-        managed_skills_dir: list_payload
-            .as_ref()
-            .map(|payload| payload.managed_skills_dir.clone())
-            .unwrap_or(managed_dir),
+        workspace_dir,
+        managed_skills_dir: managed_dir,
         managed_skills,
         summary: SkillsDashboardSummary {
-            managed_count: managed_map.len(),
+            managed_count: managed_lookup
+                .values()
+                .map(|skill| skill.path.clone())
+                .collect::<BTreeSet<_>>()
+                .len(),
             bundled_count: openclaw_skills
                 .iter()
                 .filter(|skill| skill.source == "openclaw-bundled")

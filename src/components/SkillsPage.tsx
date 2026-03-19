@@ -120,11 +120,7 @@ export default function SkillsPage() {
   }
 
   async function loadSkillsView(options?: { silent?: boolean }) {
-    const nextSnapshot = await fetchSnapshot(options);
-    if (!nextSnapshot || nextSnapshot.openclawSkills.length === 0) {
-      return;
-    }
-    void fetchRequirementDetails();
+    await fetchSnapshot(options);
   }
 
   async function loadMarketplace(query: string) {
@@ -291,6 +287,29 @@ export default function SkillsPage() {
   const canDirectInstall = isLikelySkillSlug(marketQuery)
     && !managedSkillNames.has(marketQuery.trim())
     && !openclawSkillNames.has(marketQuery.trim());
+  const hasSkillsNeedingExtraHints = openclawSkills.some(
+    (skill) => !skill.eligible && skill.installHints.length === 0,
+  );
+
+  useEffect(() => {
+    if (!snapshot || requirementsLoaded || requirementsLoading || !hasSkillsNeedingExtraHints) {
+      return;
+    }
+
+    const viewingSkillsCatalog = moduleTab === "bundled" || moduleTab === "workspace" || bundledDialogOpen;
+    if (!viewingSkillsCatalog) {
+      return;
+    }
+
+    void fetchRequirementDetails();
+  }, [
+    bundledDialogOpen,
+    hasSkillsNeedingExtraHints,
+    moduleTab,
+    requirementsLoaded,
+    requirementsLoading,
+    snapshot,
+  ]);
 
   return (
     <TooltipProvider delayDuration={250}>
