@@ -1,4 +1,5 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import appPackage from "../package.json";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
@@ -36,12 +37,61 @@ const WIZARD_TITLES: Record<WizardStep, string> = {
   install: "安装 OpenClaw",
 };
 
+const SYSTEM_INFO_CACHE_KEY = "clawhelp:system-info-cache:v1";
+
+function hasUsableExistingInstall(info: SystemInfo) {
+  return info.openclaw_fully_installed || (info.openclaw_cli_ok && info.openclaw_config_exists);
+}
+
+function readCachedSystemInfo() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(SYSTEM_INFO_CACHE_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as { systemInfo?: SystemInfo | null };
+    if (!parsed.systemInfo || !hasUsableExistingInstall(parsed.systemInfo)) {
+      return null;
+    }
+
+    return parsed.systemInfo;
+  } catch {
+    return null;
+  }
+}
+
+function persistSystemInfoCache(info: SystemInfo) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(SYSTEM_INFO_CACHE_KEY, JSON.stringify({
+    systemInfo: info,
+    savedAt: Date.now(),
+  }));
+}
+
+function clearSystemInfoCache() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.removeItem(SYSTEM_INFO_CACHE_KEY);
+}
+
 export default function App() {
-  const [mode, setMode] = useState<AppMode>("loading");
-  const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
+  const [cachedBootInfo] = useState<SystemInfo | null>(() => readCachedSystemInfo());
+  const [mode, setMode] = useState<AppMode>(() => (cachedBootInfo ? "dashboard" : "loading"));
+  const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(cachedBootInfo);
   const [wizardStep, setWizardStep] = useState<WizardStep>("welcome");
   const [completedSteps, setCompletedSteps] = useState<Set<WizardStep>>(new Set());
   const [dashboardTab, setDashboardTab] = useState<DashboardTab>("dashboard");
+  const [bootRefreshDone, setBootRefreshDone] = useState(() => !cachedBootInfo);
   const [installConfig, setInstallConfig] = useState<InstallConfig>({
     apiProvider: "anthropic",
     apiKey: "",
@@ -53,18 +103,48 @@ export default function App() {
 
   const handleDetectionResult = useCallback((info: SystemInfo) => {
     setSystemInfo(info);
-    const hasUsableExistingInstall =
-      info.openclaw_fully_installed || (info.openclaw_cli_ok && info.openclaw_config_exists);
+    const hasUsableInstall = hasUsableExistingInstall(info);
 
-    if (hasUsableExistingInstall) {
+    if (hasUsableInstall) {
+      persistSystemInfoCache(info);
       setMode("dashboard");
     } else {
+      clearSystemInfoCache();
       const nextStep: WizardStep = info.openclaw_cli_ok ? "check" : "welcome";
       setWizardStep(nextStep);
       setCompletedSteps(nextStep === "check" ? new Set<WizardStep>(["welcome"]) : new Set());
       setMode("wizard");
     }
   }, []);
+
+  useEffect(() => {
+    if (!cachedBootInfo || bootRefreshDone) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const refreshBootState = async () => {
+      try {
+        const info = await invoke<SystemInfo>("check_system");
+        if (!cancelled) {
+          handleDetectionResult(info);
+        }
+      } catch {
+        // Keep cached state if the background refresh fails.
+      } finally {
+        if (!cancelled) {
+          setBootRefreshDone(true);
+        }
+      }
+    };
+
+    void refreshBootState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bootRefreshDone, cachedBootInfo, handleDetectionResult]);
 
   const goNextWizard = useCallback(() => {
     const idx = WIZARD_STEPS.indexOf(wizardStep);
@@ -93,10 +173,18 @@ export default function App() {
 
   const handleInstallVerified = useCallback((info: SystemInfo) => {
     setSystemInfo(info);
+    if (hasUsableExistingInstall(info)) {
+      persistSystemInfoCache(info);
+    }
   }, []);
 
   const handleSystemInfoRefresh = useCallback((info: SystemInfo) => {
     setSystemInfo(info);
+    if (hasUsableExistingInstall(info)) {
+      persistSystemInfoCache(info);
+    } else {
+      clearSystemInfoCache();
+    }
   }, []);
 
   if (mode === "loading") {
@@ -125,7 +213,10 @@ export default function App() {
             <SettingsPage
               systemInfo={systemInfo}
               onSystemInfoRefresh={handleSystemInfoRefresh}
-              onUninstallComplete={() => { setMode("loading"); }}
+              onUninstallComplete={() => {
+                clearSystemInfoCache();
+                setMode("loading");
+              }}
             />
           );
       }
