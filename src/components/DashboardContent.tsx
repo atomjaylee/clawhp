@@ -14,7 +14,6 @@ import {
   Play,
   RefreshCw,
   Server,
-  Square,
   Wrench,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -29,7 +28,7 @@ interface Props {
   onNavigate?: (tab: DashboardTab) => void;
 }
 
-type GatewayStatus = "unknown" | "checking" | "running" | "stopped" | "starting" | "stopping" | "restarting" | "recovering";
+type GatewayStatus = "unknown" | "checking" | "running" | "stopped" | "starting" | "restarting" | "recovering";
 type Tone = "neutral" | "good" | "warn" | "danger";
 type DashboardModuleTab = "overview" | "actions" | "system";
 
@@ -120,7 +119,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   const [gwStatus, setGwStatus] = useState<GatewayStatus>("unknown");
   const [gwMessage, setGwMessage] = useState("");
   const [statusLoading, setStatusLoading] = useState(false);
-  const [statusError, setStatusError] = useState("");
   const [gatewaySnapshot, setGatewaySnapshot] = useState<GatewaySnapshot | null>(null);
   const [runtimeSnapshot, setRuntimeSnapshot] = useState<RuntimeSnapshot | null>(null);
   const [securityAudit, setSecurityAudit] = useState<SecurityAuditSnapshot | null>(null);
@@ -149,7 +147,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
 
   const refreshSnapshots = useCallback(async () => {
     setStatusLoading(true);
-    const errors: string[] = [];
 
     try {
       const [gatewayResult, runtimeResult, auditResult] = await Promise.allSettled([
@@ -164,29 +161,14 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
 
       if (gatewayResult.status === "fulfilled") {
         nextGateway = parseJsonResult<GatewaySnapshot>(gatewayResult.value);
-        if (!nextGateway) {
-          errors.push(gatewayResult.value.stderr || "无法读取网关状态");
-        }
-      } else {
-        errors.push("网关状态获取失败");
       }
 
       if (runtimeResult.status === "fulfilled") {
         nextRuntime = parseJsonResult<RuntimeSnapshot>(runtimeResult.value);
-        if (!nextRuntime) {
-          errors.push(runtimeResult.value.stderr || "无法读取运行状态");
-        }
-      } else {
-        errors.push("运行状态获取失败");
       }
 
       if (auditResult.status === "fulfilled") {
         nextAudit = parseJsonResult<SecurityAuditSnapshot>(auditResult.value);
-        if (!nextAudit && !nextRuntime?.securityAudit) {
-          errors.push(auditResult.value.stderr || "无法读取安全提醒");
-        }
-      } else {
-        errors.push("安全提醒获取失败");
       }
 
       if (nextGateway) {
@@ -204,10 +186,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
       } else if (nextGateway?.gateway?.probeNote) {
         setGwMessage((current) => current || nextGateway?.gateway?.probeNote || "");
       }
-
-      setStatusError(compactMessages(errors).join(" "));
-    } catch (error) {
-      setStatusError(`${error}`);
     } finally {
       setStatusLoading(false);
     }
@@ -315,25 +293,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
     }
   };
 
-  const handleStopGateway = async () => {
-    setGwStatus("stopping");
-    setGwMessage("");
-    try {
-      const r: CommandResult = await invoke("run_openclaw_command", { args: ["gateway", "stop"] });
-      setGwMessage(r.success ? "网关已停止" : (r.stderr || "停止失败"));
-    } catch (e) {
-      setGwMessage(`${e}`);
-    } finally {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      await checkGateway();
-      await Promise.all([
-        refreshSnapshots(),
-        refreshConfiguredChannels(),
-        refreshConfiguredPrimaryModel(),
-      ]);
-    }
-  };
-
   const handleOpenDashboard = async () => {
     if (openingDashboard) {
       return;
@@ -384,8 +343,8 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   const topFinding = securityFindings.find((finding) => finding.severity !== "info") ?? securityFindings[0];
   const gatewayProbeError = firstMeaningfulLine(gatewaySnapshot?.rpc?.error);
   const gwRunning = gwStatus === "running";
-  const gwBusy = gwStatus === "starting" || gwStatus === "stopping" || gwStatus === "restarting" || gwStatus === "checking" || gwStatus === "recovering";
-  const showGatewayRuntimeActions = gwStatus === "running" || gwStatus === "stopping" || gwStatus === "restarting" || gwStatus === "recovering";
+  const gwBusy = gwStatus === "starting" || gwStatus === "restarting" || gwStatus === "checking" || gwStatus === "recovering";
+  const showGatewayRuntimeActions = gwStatus === "running" || gwStatus === "restarting" || gwStatus === "recovering";
   const riskCount = (securitySummary?.critical ?? 0) + (securitySummary?.warn ?? 0);
   const modelConfigured = defaultModel !== "未检测";
   const controlUiReady = gwRunning && gatewaySnapshot?.rpc?.ok !== false;
@@ -509,7 +468,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
                     <StatusBadge tone={controlUiReady && modelConfigured ? "good" : gwBusy ? "neutral" : "warn"}>
                       {gwStatus === "checking" ? "检测中"
                         : gwStatus === "starting" ? "启动中"
-                        : gwStatus === "stopping" ? "停止中"
                         : gwStatus === "restarting" ? "重启中"
                         : gwStatus === "recovering" ? "自动修复中"
                         : gwRunning ? "网关运行中"
@@ -538,16 +496,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
                     <Button size="sm" variant="outline" onClick={handleRestartGateway} disabled={gwBusy}>
                       {gwStatus === "restarting" ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
                       {gwStatus === "restarting" ? "重启中..." : "重启网关"}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={handleStopGateway}
-                      disabled={gwBusy}
-                      className="border-red-500/20 text-red-400 hover:bg-red-500/10 hover:text-red-400"
-                    >
-                      {gwStatus === "stopping" ? <Loader2 size={13} className="animate-spin" /> : <Square size={13} />}
-                      停止
                     </Button>
                   </>
                 ) : (
@@ -651,23 +599,14 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
                 <SnapshotChip label="系统" value={systemInfo.openclaw_fully_installed ? "安装完整" : "待修复"} tone={systemInfo.openclaw_fully_installed ? "good" : "warn"} />
               </div>
 
-              {statusError ? (
-                <InlineNote
-                  className="mt-4"
-                  tone="warn"
-                  title="状态还没完全读出来"
-                  body={statusError}
-                />
-              ) : (
-                <InlineNote
-                  className="mt-4"
-                  tone="neutral"
-                  title={controlUiReady ? "现在可以直接开始用了" : "先把上面的步骤补齐"}
-                  body={controlUiReady
-                    ? "你现在可以打开 Control UI，继续在模型、频道和设置页里完成更细的配置。"
-                    : "如果你不知道下一步点哪里，就从“启动网关”或“去配模型”开始。"}
-                />
-              )}
+              <InlineNote
+                className="mt-4"
+                tone="neutral"
+                title={controlUiReady ? "现在可以直接开始用了" : "先把上面的步骤补齐"}
+                body={controlUiReady
+                  ? "你现在可以打开 Control UI，继续在模型、频道和设置页里完成更细的配置。"
+                  : "如果你不知道下一步点哪里，就从“启动网关”或“去配模型”开始。"}
+              />
             </CardContent>
           </Card>
         </div>
@@ -830,12 +769,6 @@ function parseJsonResult<T>(result: CommandResult): T | null {
   } catch {
     return null;
   }
-}
-
-function compactMessages(messages: string[]) {
-  return messages
-    .map((message) => firstMeaningfulLine(message))
-    .filter((message): message is string => Boolean(message));
 }
 
 function firstMeaningfulLine(text?: string | null) {
