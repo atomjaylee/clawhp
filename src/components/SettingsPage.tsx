@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Progress } from "@/components/ui/progress";
+import ModuleTabs, { type ModuleTabItem } from "@/components/ui/module-tabs";
 import PageShell from "@/components/PageShell";
 import type { SystemInfo, CommandResult, LogEntry } from "@/types";
 
@@ -63,6 +64,8 @@ interface Props {
   onUninstallComplete?: () => void;
 }
 
+type SettingsModuleTab = "maintenance" | "paths" | "danger";
+
 export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninstallComplete }: Props) {
   const openclawHome = systemInfo.openclaw_home_path || "~/.openclaw";
   const joinPath = (...parts: string[]) => {
@@ -101,6 +104,7 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
   const [uninstallLogs, setUninstallLogs] = useState<LogEntry[]>([]);
   const [uninstallSuccess, setUninstallSuccess] = useState(false);
   const [uninstallProgress, setUninstallProgress] = useState(0);
+  const [moduleTab, setModuleTab] = useState<SettingsModuleTab>("maintenance");
   const uninstallLogEndRef = useRef<HTMLDivElement>(null);
   const uninstallProgressRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -340,6 +344,11 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
       : githubHasNewRelease && updateSnapshot?.availability?.available === false
         ? "GitHub 已有新版本，但当前更新源还没明确返回可用更新，可能需要稍后再试。"
         : null;
+  const moduleTabs: ModuleTabItem<SettingsModuleTab>[] = [
+    { id: "maintenance", label: "维护", icon: Wand2 },
+    { id: "paths", label: "路径与文档", icon: FolderOpen },
+    { id: "danger", label: "危险操作", icon: Trash2 },
+  ];
 
   return (
     <PageShell
@@ -358,6 +367,10 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
         </div>
       )}
     >
+        <ModuleTabs items={moduleTabs} value={moduleTab} onValueChange={setModuleTab} />
+
+        {moduleTab === "maintenance" && (
+          <>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           {/* Onboard */}
           <Card>
@@ -519,7 +532,11 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
             </CardContent>
           </Card>
         </div>
+          </>
+        )}
 
+        {moduleTab === "paths" && (
+          <>
         {/* Config Paths */}
         <Card>
           <CardContent className="p-5">
@@ -577,7 +594,11 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
             </Card>
           </a>
         </div>
+          </>
+        )}
 
+        {moduleTab === "danger" && (
+          <>
         {/* Uninstall / Danger Zone */}
         <Card className="border-red-500/20">
           <CardContent className="p-5">
@@ -704,6 +725,8 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
             )}
           </CardContent>
         </Card>
+          </>
+        )}
     </PageShell>
   );
 }

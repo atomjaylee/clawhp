@@ -20,6 +20,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import ModuleTabs, { type ModuleTabItem } from "@/components/ui/module-tabs";
 import PageShell from "@/components/PageShell";
 import type { AgentInfo, CommandResult, LogEntry } from "@/types";
 
@@ -73,6 +74,7 @@ interface FeishuAuthPollPayload {
 }
 
 type FeishuSetupStep = "install" | "bind" | "done";
+type ChannelsModuleTab = "list" | "guide";
 
 interface ExistingFeishuBindingForm {
   appId: string;
@@ -310,6 +312,7 @@ export default function ChannelsPage() {
   const [bindingCatalogLoading, setBindingCatalogLoading] = useState(false);
   const [bindingCatalogError, setBindingCatalogError] = useState("");
   const [selectedAgentId, setSelectedAgentId] = useState("");
+  const [moduleTab, setModuleTab] = useState<ChannelsModuleTab>("list");
   const [unbindLoading, setUnbindLoading] = useState(false);
 
   const installProgressRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1129,6 +1132,10 @@ export default function ChannelsPage() {
   }, [applyFeishuBindingSuccess, authSession, bindingPhase, editingAccountId, editingFeishuAccount, selectedAgentId]);
 
   const showInstallLogs = installPhase === "running" || installLogs.length > 0;
+  const moduleTabs: ModuleTabItem<ChannelsModuleTab>[] = [
+    { id: "list", label: "已接入", icon: MessageSquare, badge: channels.length },
+    { id: "guide", label: "飞书接入", icon: Settings2 },
+  ];
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -1168,116 +1175,173 @@ export default function ChannelsPage() {
           </div>
         )}
       >
-        {error && (
-          <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-300">
-            {error}
-          </div>
+        <ModuleTabs items={moduleTabs} value={moduleTab} onValueChange={setModuleTab} />
+
+        {moduleTab === "list" && (
+          <>
+            {error && (
+              <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-300">
+                {error}
+              </div>
+            )}
+
+            {loading ? (
+              <div className="flex items-center justify-center py-20 text-muted-foreground">
+                <Loader2 size={18} className="mr-2 animate-spin" />
+                <span className="text-[13px]">加载中...</span>
+              </div>
+            ) : channels.length === 0 ? (
+              <Card>
+                <CardContent className="py-16 text-center">
+                  <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-500/10">
+                    <Radio size={22} className="text-violet-400" />
+                  </div>
+                  <h3 className="mb-1 text-[14px] font-semibold">先接入一个飞书频道</h3>
+                  <p className="mx-auto mb-4 max-w-sm text-[12px] text-muted-foreground">
+                    点击“添加飞书”后会直接在应用内检测并安装官方插件，接着可以扫码创建新机器人，或绑定已有机器人，不再跳出命令行窗口。
+                  </p>
+                  <div className="flex justify-center gap-2">
+                    <Button size="sm" onClick={() => void openFeishuDialog()}>
+                      <Plus size={14} /> 添加飞书
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="space-y-3">
+                {channels.map((channel) => {
+                  const info = getChannelInfo(channel.channel);
+                  const status = getStatus(channel.channel, channel.account);
+                  const statusMeta = status ? getChannelStatusMeta(status.state) : null;
+                  const feishuBinding = channel.channel === "feishu"
+                    ? (feishuAccountBindingMap.get(channel.account) ?? null)
+                    : null;
+                  const key = `${channel.channel}:${channel.account}`;
+
+                  return (
+                    <Card key={key} className="group transition-colors hover:border-violet-500/20">
+                      <CardContent className="p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex min-w-0 items-center gap-3">
+                            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/10">
+                              <MessageSquare size={16} className="text-violet-400" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-[13px] font-semibold">{channel.name}</span>
+                                <Badge variant="secondary" className={`px-1.5 py-0 text-[10px] ${info.color}`}>
+                                  {info.label}
+                                </Badge>
+                                {status && statusMeta && (
+                                  <span className={`flex items-center gap-1 text-[10px] ${statusMeta.className}`}>
+                                    {statusMeta.icon}
+                                    {statusMeta.label}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                账号: {channel.account}
+                                {!channel.enabled && <span className="ml-2 text-amber-400">已禁用</span>}
+                              </p>
+                              {channel.channel === "feishu" && (
+                                <p className="mt-1 text-[11px] text-muted-foreground">
+                                  Agent: {feishuBinding?.boundAgentId ? (agentLabelById.get(feishuBinding.boundAgentId) || feishuBinding.boundAgentId) : "未绑定"}
+                                </p>
+                              )}
+                              {status?.message && (
+                                <p className="mt-1 text-[11px] text-muted-foreground">{status.message}</p>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1">
+                            {channel.channel === "feishu" && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7 text-muted-foreground opacity-0 transition-opacity hover:text-sky-300 group-hover:opacity-100"
+                                    onClick={() => void openFeishuDialog(channel.account)}
+                                  >
+                                    <Settings2 size={13} />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>管理飞书官方插件</TooltipContent>
+                              </Tooltip>
+                            )}
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7 text-muted-foreground opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
+                                  onClick={() => openRemoveDialog(channel.channel, channel.account)}
+                                  disabled={removing === key}
+                                >
+                                  {removing === key ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>移除频道</TooltipContent>
+                            </Tooltip>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
 
-        {loading ? (
-          <div className="flex items-center justify-center py-20 text-muted-foreground">
-            <Loader2 size={18} className="mr-2 animate-spin" />
-            <span className="text-[13px]">加载中...</span>
-          </div>
-        ) : channels.length === 0 ? (
-          <Card>
-            <CardContent className="py-16 text-center">
-              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-500/10">
-                <Radio size={22} className="text-violet-400" />
-              </div>
-              <h3 className="mb-1 text-[14px] font-semibold">先接入一个飞书频道</h3>
-              <p className="mx-auto mb-4 max-w-sm text-[12px] text-muted-foreground">
-                点击“添加飞书”后会直接在应用内检测并安装官方插件，接着可以扫码创建新机器人，或绑定已有机器人，不再跳出命令行窗口。
-              </p>
-              <div className="flex justify-center gap-2">
-                <Button size="sm" onClick={() => void openFeishuDialog()}>
-                  <Plus size={14} /> 添加飞书
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="space-y-3">
-            {channels.map((channel) => {
-              const info = getChannelInfo(channel.channel);
-              const status = getStatus(channel.channel, channel.account);
-              const statusMeta = status ? getChannelStatusMeta(status.state) : null;
-              const feishuBinding = channel.channel === "feishu"
-                ? (feishuAccountBindingMap.get(channel.account) ?? null)
-                : null;
-              const key = `${channel.channel}:${channel.account}`;
+        {moduleTab === "guide" && (
+          <div className="space-y-4">
+            <Card className="border-white/[0.08] bg-[radial-gradient(circle_at_top_left,rgba(124,58,237,0.16),transparent_38%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))]">
+              <CardContent className="space-y-4 p-5">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <h3 className="text-[14px] font-semibold">飞书接入向导</h3>
+                    <p className="mt-1 text-[12px] text-muted-foreground">
+                      把频道管理拆成“已接入”和“接入向导”两个模块，平时先看列表，需要新增时再按步骤操作。
+                    </p>
+                  </div>
+                  <Button size="sm" onClick={() => void openFeishuDialog()}>
+                    <Plus size={14} />
+                    添加飞书
+                  </Button>
+                </div>
 
-              return (
-                <Card key={key} className="group transition-colors hover:border-violet-500/20">
-                  <CardContent className="p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex min-w-0 items-center gap-3">
-                        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/10">
-                          <MessageSquare size={16} className="text-violet-400" />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-[13px] font-semibold">{channel.name}</span>
-                            <Badge variant="secondary" className={`px-1.5 py-0 text-[10px] ${info.color}`}>
-                              {info.label}
-                            </Badge>
-                            {status && statusMeta && (
-                              <span className={`flex items-center gap-1 text-[10px] ${statusMeta.className}`}>
-                                {statusMeta.icon}
-                                {statusMeta.label}
-                              </span>
-                            )}
-                          </div>
-                          <p className="mt-0.5 text-[11px] text-muted-foreground">
-                            账号: {channel.account}
-                            {!channel.enabled && <span className="ml-2 text-amber-400">已禁用</span>}
-                          </p>
-                          {channel.channel === "feishu" && (
-                            <p className="mt-1 text-[11px] text-muted-foreground">
-                              Agent: {feishuBinding?.boundAgentId ? (agentLabelById.get(feishuBinding.boundAgentId) || feishuBinding.boundAgentId) : "未绑定"}
-                            </p>
-                          )}
-                          {status?.message && (
-                            <p className="mt-1 text-[11px] text-muted-foreground">{status.message}</p>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-1">
-                        {channel.channel === "feishu" && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-7 w-7 text-muted-foreground opacity-0 transition-opacity hover:text-sky-300 group-hover:opacity-100"
-                                onClick={() => void openFeishuDialog(channel.account)}
-                              >
-                                <Settings2 size={13} />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>管理飞书官方插件</TooltipContent>
-                          </Tooltip>
-                        )}
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 text-muted-foreground opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
-                              onClick={() => openRemoveDialog(channel.channel, channel.account)}
-                              disabled={removing === key}
-                            >
-                              {removing === key ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>移除频道</TooltipContent>
-                        </Tooltip>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
+                <div className="grid gap-3 md:grid-cols-3">
+                  <Card className="border-white/[0.08] bg-black/10">
+                    <CardContent className="space-y-2 p-4">
+                      <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 1 步</p>
+                      <h4 className="text-[13px] font-semibold">安装官方插件</h4>
+                      <p className="text-[12px] leading-5 text-muted-foreground">
+                        应用内自动检测飞书官方插件，缺失时直接安装，不再跳出终端窗口。
+                      </p>
+                    </CardContent>
+                  </Card>
+                  <Card className="border-white/[0.08] bg-black/10">
+                    <CardContent className="space-y-2 p-4">
+                      <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 2 步</p>
+                      <h4 className="text-[13px] font-semibold">绑定 Agent</h4>
+                      <p className="text-[12px] leading-5 text-muted-foreground">
+                        频道和 Agent 保持一对一关系，扫码创建或绑定已有机器人时一起完成路由。
+                      </p>
+                    </CardContent>
+                  </Card>
+                  <Card className="border-white/[0.08] bg-black/10">
+                    <CardContent className="space-y-2 p-4">
+                      <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 3 步</p>
+                      <h4 className="text-[13px] font-semibold">后台生效</h4>
+                      <p className="text-[12px] leading-5 text-muted-foreground">
+                        绑定完成后会自动刷新频道列表和后台配置，列表模块里会立即看到结果。
+                      </p>
+                    </CardContent>
+                  </Card>
+                </div>
+              </CardContent>
+            </Card>
           </div>
         )}
       </PageShell>

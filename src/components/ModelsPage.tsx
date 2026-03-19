@@ -8,11 +8,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import ModuleTabs, { type ModuleTabItem } from "@/components/ui/module-tabs";
 import { ConfirmActionDialog } from "@/components/ConfirmActionDialog";
 import PageShell from "@/components/PageShell";
 import type { ProviderInfo, CommandResult } from "@/types";
 
 type View = "list" | "add" | "sync" | "refresh";
+type ModelsModuleTab = "configured" | "overview";
 type PendingDelete =
   | { kind: "provider"; providerName: string }
   | { kind: "model"; providerName: string; modelId: string; isPrimary: boolean };
@@ -69,6 +71,7 @@ export default function ModelsPage() {
   const [loading, setLoading] = useState(true);
   const [settingPrimaryRef, setSettingPrimaryRef] = useState("");
   const [view, setView] = useState<View>("list");
+  const [moduleTab, setModuleTab] = useState<ModelsModuleTab>("configured");
 
   const [addUrl, setAddUrl] = useState("");
   const [addKey, setAddKey] = useState("");
@@ -328,6 +331,11 @@ export default function ModelsPage() {
 
   const totalModels = providers.reduce((sum, p) => sum + p.models.length, 0);
   const sortedProviders = [...providers].sort((a, b) => compareProviders(a, b, primaryModel));
+  const primaryProviderName = primaryModel ? primaryModel.split("/")[0] : "";
+  const moduleTabs: ModuleTabItem<ModelsModuleTab>[] = [
+    { id: "configured", label: "已配置", icon: Box, badge: providers.length },
+    { id: "overview", label: "概览", icon: Star, badge: totalModels },
+  ];
   const refreshExistingIds = new Set(refreshProvider?.models.map((model) => model.id) ?? []);
   const refreshSelectedIds = refreshCandidates
     .filter((candidate) => refreshSelectedModels.has(candidate.id))
@@ -641,21 +649,87 @@ export default function ModelsPage() {
           ) : providers.length === 0 ? (
             <EmptyState onAdd={() => setView("add")} />
           ) : (
-            <div className="space-y-3">
-              {sortedProviders.map((p) => (
-                <ProviderCard
-                  key={p.name}
-                  provider={p}
-                  primaryModel={primaryModel}
-                  onDelete={() => handleDeleteProvider(p.name)}
-                  onSetPrimary={handleSetPrimary}
-                  onRemoveModel={(mid) => handleRemoveModel(p.name, mid)}
-                  onRefresh={() => void handleStartRefreshProvider(p)}
-                  refreshing={refreshingProviderName === p.name}
-                  settingPrimaryRef={settingPrimaryRef}
-                />
-              ))}
-            </div>
+            <>
+              <ModuleTabs items={moduleTabs} value={moduleTab} onValueChange={setModuleTab} />
+
+              {moduleTab === "overview" ? (
+                <div className="space-y-4">
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <Card className="border-white/[0.06] bg-white/[0.02]">
+                      <CardContent className="p-4">
+                        <p className="text-[11px] text-muted-foreground">Provider 数量</p>
+                        <p className="mt-2 text-2xl font-semibold">{providers.length}</p>
+                      </CardContent>
+                    </Card>
+                    <Card className="border-white/[0.06] bg-white/[0.02]">
+                      <CardContent className="p-4">
+                        <p className="text-[11px] text-muted-foreground">已同步模型</p>
+                        <p className="mt-2 text-2xl font-semibold">{totalModels}</p>
+                      </CardContent>
+                    </Card>
+                    <Card className="border-white/[0.06] bg-white/[0.02]">
+                      <CardContent className="p-4">
+                        <p className="text-[11px] text-muted-foreground">主模型所属</p>
+                        <p className="mt-2 truncate text-[16px] font-semibold font-mono">
+                          {primaryProviderName || "未设置"}
+                        </p>
+                      </CardContent>
+                    </Card>
+                  </div>
+
+                  <Card className="border-white/[0.06] bg-white/[0.02]">
+                    <CardContent className="space-y-4 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <h3 className="text-[13px] font-semibold">当前配置概览</h3>
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            先看整体配置，再切到“已配置”模块逐个维护 Provider。
+                          </p>
+                        </div>
+                        <Button size="sm" variant="outline" onClick={() => setModuleTab("configured")}>
+                          查看已配置
+                        </Button>
+                      </div>
+
+                      <div className="grid gap-3 lg:grid-cols-3">
+                        {sortedProviders.slice(0, 3).map((provider) => (
+                          <Card key={provider.name} className="border-white/[0.06] bg-black/10">
+                            <CardContent className="space-y-2 p-4">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="truncate text-[13px] font-semibold">{provider.name}</p>
+                                <Badge className="border-0 bg-violet-500/10 text-violet-300">
+                                  {provider.models.length} 模型
+                                </Badge>
+                              </div>
+                              <p className="truncate font-mono text-[11px] text-muted-foreground">{provider.base_url}</p>
+                              <p className="text-[11px] text-muted-foreground">
+                                {provider.models.length > 0 ? `已同步 ${provider.models.length} 个模型` : "还没有同步模型"}
+                              </p>
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {sortedProviders.map((p) => (
+                    <ProviderCard
+                      key={p.name}
+                      provider={p}
+                      primaryModel={primaryModel}
+                      onDelete={() => handleDeleteProvider(p.name)}
+                      onSetPrimary={handleSetPrimary}
+                      onRemoveModel={(mid) => handleRemoveModel(p.name, mid)}
+                      onRefresh={() => void handleStartRefreshProvider(p)}
+                      refreshing={refreshingProviderName === p.name}
+                      settingPrimaryRef={settingPrimaryRef}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
           )}
       </PageShell>
       <ConfirmActionDialog

@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
+import ModuleTabs, { type ModuleTabItem } from "@/components/ui/module-tabs";
 import PageShell from "@/components/PageShell";
 import type { SystemInfo, CommandResult, DashboardTab } from "@/types";
 
@@ -32,6 +33,7 @@ interface Props {
 
 type GatewayStatus = "unknown" | "checking" | "running" | "stopped" | "starting" | "stopping" | "recovering";
 type Tone = "neutral" | "good" | "warn" | "danger";
+type DashboardModuleTab = "overview" | "actions" | "system";
 
 const PORT_POLL_INTERVAL = 5000;
 const SNAPSHOT_POLL_INTERVAL = 30000;
@@ -129,6 +131,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   const [configuredPrimaryModel, setConfiguredPrimaryModel] = useState<string | null>(null);
   const [openingDashboard, setOpeningDashboard] = useState(false);
   const [configuredChannelCount, setConfiguredChannelCount] = useState(0);
+  const [moduleTab, setModuleTab] = useState<DashboardModuleTab>("overview");
 
   const checkGateway = useCallback(async () => {
     try {
@@ -442,6 +445,11 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
       onAction: () => onNavigate?.("settings"),
     });
   }
+  const moduleTabs: ModuleTabItem<DashboardModuleTab>[] = [
+    { id: "overview", label: "上手指南", icon: BookOpen, badge: `${setupSteps.filter((step) => step.done).length}/${setupSteps.length}` },
+    { id: "actions", label: "常用入口", icon: ArrowRight, badge: attentionItems.length || "OK" },
+    { id: "system", label: "环境信息", icon: Wrench, badge: riskCount || "稳" },
+  ];
 
   return (
     <PageShell
@@ -597,6 +605,10 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
           </CardContent>
         </Card>
 
+        <ModuleTabs items={moduleTabs} value={moduleTab} onValueChange={setModuleTab} />
+
+        {moduleTab === "overview" && (
+          <>
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.2fr_0.8fr]">
           <Card>
             <CardContent className="p-5">
@@ -668,7 +680,11 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
             </CardContent>
           </Card>
         </div>
+          </>
+        )}
 
+        {moduleTab === "actions" && (
+          <>
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.9fr_1.1fr]">
           <Card className={attentionItems.length > 0 ? "border-amber-500/20" : "border-emerald-500/20"}>
             <CardContent className="p-5">
@@ -754,7 +770,11 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
             </CardContent>
           </Card>
         </div>
+          </>
+        )}
 
+        {moduleTab === "system" && (
+          <>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <Card>
             <CardContent className="p-5">
@@ -803,6 +823,8 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
             </CardContent>
           </Card>
         </div>
+          </>
+        )}
     </PageShell>
   );
 }

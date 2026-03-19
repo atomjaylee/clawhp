@@ -9,6 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import ModuleTabs, { type ModuleTabItem } from "@/components/ui/module-tabs";
 import { ConfirmActionDialog } from "@/components/ConfirmActionDialog";
 import PageShell from "@/components/PageShell";
 import type { AgentInfo, CommandResult, ProviderInfo } from "@/types";
@@ -16,6 +17,7 @@ import type { AgentInfo, CommandResult, ProviderInfo } from "@/types";
 const inputCls = "w-full h-9 px-3 text-[13px] rounded-lg border border-white/[0.08] bg-white/[0.03] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/30 transition-colors";
 const textareaCls = `${inputCls} min-h-[90px] h-auto py-2 resize-y`;
 const editorCls = "min-h-[360px] w-full rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-3 font-mono text-[12px] leading-6 text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/30 transition-colors resize-y";
+type AgentsModuleTab = "workspace" | "create";
 
 interface ModelOption {
   value: string;
@@ -108,6 +110,7 @@ export default function AgentsPage() {
   const [workspaceSaving, setWorkspaceSaving] = useState(false);
   const [workspaceError, setWorkspaceError] = useState("");
   const [workspaceSuccess, setWorkspaceSuccess] = useState("");
+  const [moduleTab, setModuleTab] = useState<AgentsModuleTab>("workspace");
 
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const createInFlightRef = useRef(false);
@@ -344,6 +347,10 @@ export default function AgentsPage() {
   const suggestedAgentDir = agentDirPath.trim() || `${suggestedRoot}/agent`;
   const parsedBindings = parseBindings(bindingsText);
   const activeWorkspaceFileMeta = WORKSPACE_FILE_DEFS.find((file) => file.name === selectedWorkspaceFile) ?? WORKSPACE_FILE_DEFS[0];
+  const moduleTabs: ModuleTabItem<AgentsModuleTab>[] = [
+    { id: "workspace", label: "工作区", icon: FileText, badge: agents.length },
+    { id: "create", label: "新建说明", icon: UserPlus },
+  ];
 
   const confirmDiscardDraft = () => {
     if (!workspaceDirty) return true;
@@ -577,6 +584,10 @@ export default function AgentsPage() {
             </CardContent>
           </Card>
 
+          <ModuleTabs items={moduleTabs} value={moduleTab} onValueChange={setModuleTab} />
+
+          {moduleTab === "workspace" && (
+          <>
           {loading ? (
             <div className="flex items-center justify-center py-20 text-muted-foreground">
               <Loader2 size={18} className="mr-2 animate-spin" />
@@ -786,6 +797,59 @@ export default function AgentsPage() {
                 )}
               </div>
             </>
+          )}
+          </>
+          )}
+
+          {moduleTab === "create" && (
+            <div className="space-y-4">
+              <Card className="border-white/[0.08] bg-[radial-gradient(circle_at_top_left,rgba(14,165,233,0.16),transparent_38%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))]">
+                <CardContent className="space-y-4 p-5">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <h3 className="text-[14px] font-semibold">新建 Agent 流程</h3>
+                      <p className="mt-1 text-[12px] text-muted-foreground">
+                        页面里先保留说明和工作区两个模块，创建时再打开弹窗，避免把长表单一直堆在主页面上。
+                      </p>
+                    </div>
+                    <Button size="sm" onClick={openCreateDialog}>
+                      <UserPlus />
+                      新建 Agent
+                    </Button>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <Card className="border-white/[0.08] bg-black/10">
+                      <CardContent className="space-y-2 p-4">
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 1 步</p>
+                        <h4 className="text-[13px] font-semibold">选择预设或手动创建</h4>
+                        <p className="text-[12px] leading-5 text-muted-foreground">
+                          可以用角色预设直接带入人格和规则，也可以从空白 Agent 开始。
+                        </p>
+                      </CardContent>
+                    </Card>
+                    <Card className="border-white/[0.08] bg-black/10">
+                      <CardContent className="space-y-2 p-4">
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 2 步</p>
+                        <h4 className="text-[13px] font-semibold">绑定模型与目录</h4>
+                        <p className="text-[12px] leading-5 text-muted-foreground">
+                          创建时会分配独立 workspace、agentDir，也可以手动覆盖目录和路由绑定。
+                        </p>
+                      </CardContent>
+                    </Card>
+                    <Card className="border-white/[0.08] bg-black/10">
+                      <CardContent className="space-y-2 p-4">
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">第 3 步</p>
+                        <h4 className="text-[13px] font-semibold">进入工作区继续调教</h4>
+                        <p className="text-[12px] leading-5 text-muted-foreground">
+                          建好之后会回到工作区模块，继续编辑 `AGENTS.md`、`SOUL.md` 等长期文件。
+                        </p>
+                      </CardContent>
+                    </Card>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
           )}
       </PageShell>
       {createDialogOpen && (

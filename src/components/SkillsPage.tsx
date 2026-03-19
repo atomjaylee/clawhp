@@ -9,6 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import ModuleTabs, { type ModuleTabItem } from "@/components/ui/module-tabs";
 import PageShell from "@/components/PageShell";
 import type {
   CommandResult,
@@ -21,6 +22,7 @@ import type {
 } from "@/types";
 
 type BundledFilter = "all" | "ready" | "needs-setup";
+type SkillsModuleTab = "installed" | "market" | "workspace" | "bundled";
 
 const TENCENT_MARKETPLACE = {
   id: "tencent",
@@ -51,6 +53,7 @@ export default function SkillsPage() {
   const [deleteError, setDeleteError] = useState("");
   const [deleting, setDeleting] = useState<string | null>(null);
   const [bundledFilter, setBundledFilter] = useState<BundledFilter>("all");
+  const [moduleTab, setModuleTab] = useState<SkillsModuleTab>("installed");
 
   async function fetchSnapshot(options?: { silent?: boolean }) {
     if (!options?.silent) {
@@ -255,6 +258,12 @@ export default function SkillsPage() {
   const warningMessages = [...(snapshot?.warnings ?? []), ...requirementWarnings];
   const managedSkillNames = new Set(managedSkills.map((skill) => skill.originSlug || skill.name));
   const openclawSkillNames = new Set(openclawSkills.map((skill) => skill.name));
+  const moduleTabs: ModuleTabItem<SkillsModuleTab>[] = [
+    { id: "installed", label: "已安装", icon: Puzzle, badge: managedSkills.length },
+    { id: "market", label: "市场", icon: Download, badge: marketItems.length || "推荐" },
+    { id: "workspace", label: "工作区", icon: FolderOpen, badge: workspaceSkills.length },
+    { id: "bundled", label: "内置能力", icon: Sparkles, badge: bundledSkills.length },
+  ];
   const filteredBundledSkills = bundledSkills.filter((skill) => {
     const keyword = bundledQuery.trim().toLowerCase();
     if (bundledFilter === "ready") {
@@ -389,220 +398,244 @@ export default function SkillsPage() {
               </div>
             )}
 
-            <Card className="overflow-hidden border-white/[0.08] bg-[radial-gradient(circle_at_top_left,rgba(8,145,178,0.14),transparent_38%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))]">
-              <CardContent className="space-y-4 p-4">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <Sparkles size={15} className="text-cyan-300" />
-                      <h3 className="text-[14px] font-semibold">OpenClaw 自带 Skills</h3>
+            <ModuleTabs items={moduleTabs} value={moduleTab} onValueChange={setModuleTab} />
+
+            {moduleTab === "bundled" && (
+              <Card className="overflow-hidden border-white/[0.08] bg-[radial-gradient(circle_at_top_left,rgba(8,145,178,0.14),transparent_38%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))]">
+                <CardContent className="space-y-4 p-4">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <Sparkles size={15} className="text-cyan-300" />
+                        <h3 className="text-[14px] font-semibold">OpenClaw 自带 Skills</h3>
+                      </div>
+                      <p className="text-[12px] text-muted-foreground">
+                        自带 Skills 数量很多，这里先保留摘要；需要时再进弹窗集中查看和补依赖。
+                      </p>
                     </div>
-                    <p className="text-[12px] text-muted-foreground">
-                      自带 Skills 数量很多，主页面先只保留摘要；需要时再进弹窗集中查看和补依赖。
-                    </p>
-                  </div>
-                  <Button size="sm" onClick={() => setBundledDialogOpen(true)}>
-                    <Sparkles size={14} />
-                    查看全部
-                  </Button>
-                </div>
-
-                <div className="grid gap-3 md:grid-cols-3">
-                  <CompactMetric label="自带总数" value={bundledSkills.length} tone="amber" />
-                  <CompactMetric label="可直接用" value={readyBundledCount} tone="teal" />
-                  <CompactMetric label="待补依赖" value={missingBundledCount} tone="rose" />
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  {bundledSkills.slice(0, 8).map((skill) => (
-                    <Badge key={skill.name} className="border-0 bg-white/[0.06] px-2 py-0.5 text-[10px] text-muted-foreground">
-                      {skill.name}
-                    </Badge>
-                  ))}
-                  {bundledSkills.length > 8 ? (
-                    <Badge className="border-0 bg-cyan-500/12 px-2 py-0.5 text-[10px] text-cyan-100">
-                      +{bundledSkills.length - 8} 个
-                    </Badge>
-                  ) : null}
-                </div>
-              </CardContent>
-            </Card>
-
-            {workspaceSkills.length > 0 ? (
-              <>
-                <SectionHeader
-                  title="工作区 Skills"
-                  description={`这些是当前工作区透出的自定义 Skills。工作区目录：${snapshot?.workspaceDir || "~/.openclaw/workspace"}`}
-                />
-                <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
-                  {workspaceSkills.map((skill) => (
-                    <AvailableSkillCard
-                      key={`${skill.source}:${skill.name}`}
-                      skill={skill}
-                      requirementDetailsLoading={requirementsLoading && !requirementsLoaded}
-                      installingRequirementKey={installingRequirementKey}
-                      onInstallRequirement={(hintId, hintLabel) => void handleInstallRequirement(skill, hintId, hintLabel)}
-                    />
-                  ))}
-                </div>
-              </>
-            ) : null}
-
-            <Card className="overflow-hidden border-white/[0.08] bg-[radial-gradient(circle_at_top_left,rgba(20,184,166,0.12),transparent_40%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))]">
-              <CardContent className="space-y-4 p-4">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <Blocks size={15} className="text-teal-300" />
-                      <h3 className="text-[14px] font-semibold">腾讯 SkillHub 安装</h3>
-                    </div>
-                    <p className="text-[12px] text-muted-foreground">
-                      这里只接腾讯 SkillHub。空白时展示推荐 Skills，输入关键词后直接搜索腾讯市场。
-                    </p>
-                  </div>
-                  <Button size="sm" variant="outline" asChild>
-                    <a href={TENCENT_MARKETPLACE.url} target="_blank" rel="noreferrer">
-                      <ExternalLink />
-                      打开 {TENCENT_MARKETPLACE.label}
-                    </a>
-                  </Button>
-                </div>
-
-                <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
-                  <div className="space-y-2">
-                    <label htmlFor="skill-market-search" className="text-[12px] font-medium text-foreground">
-                      搜索或输入 slug
-                    </label>
-                    <div className="relative">
-                      <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                      <Input
-                        id="skill-market-search"
-                        value={marketQuery}
-                        onChange={(event) => setMarketQuery(event.target.value)}
-                        placeholder="例如 weather、one-password、语音识别"
-                        className="h-10 border-white/[0.08] bg-black/20 pl-9"
-                      />
-                    </div>
-                    <p className="text-[11px] text-muted-foreground">{TENCENT_MARKETPLACE.description}</p>
-                  </div>
-
-                  <div className="flex items-end">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={!canDirectInstall || Boolean(installingSlug)}
-                      onClick={() => void handleInstall(marketQuery.trim())}
-                    >
-                      {installingSlug === marketQuery.trim() ? <Loader2 className="animate-spin" /> : <Download size={14} />}
-                      按 slug 安装
+                    <Button size="sm" onClick={() => setBundledDialogOpen(true)}>
+                      <Sparkles size={14} />
+                      查看全部
                     </Button>
                   </div>
-                </div>
 
-                {marketError && (
-                  <div className="rounded-xl border border-red-500/20 bg-red-500/8 px-3 py-2.5 text-[12px] text-red-200">
-                    {marketError}
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <CompactMetric label="自带总数" value={bundledSkills.length} tone="amber" />
+                    <CompactMetric label="可直接用" value={readyBundledCount} tone="teal" />
+                    <CompactMetric label="待补依赖" value={missingBundledCount} tone="rose" />
                   </div>
-                )}
 
-                {marketMessage && (
-                  <div className="rounded-xl border border-teal-500/20 bg-teal-500/10 px-3 py-2.5 text-[12px] text-teal-100">
-                    {marketMessage}
+                  <div className="flex flex-wrap gap-2">
+                    {bundledSkills.slice(0, 8).map((skill) => (
+                      <Badge key={skill.name} className="border-0 bg-white/[0.06] px-2 py-0.5 text-[10px] text-muted-foreground">
+                        {skill.name}
+                      </Badge>
+                    ))}
+                    {bundledSkills.length > 8 ? (
+                      <Badge className="border-0 bg-cyan-500/12 px-2 py-0.5 text-[10px] text-cyan-100">
+                        +{bundledSkills.length - 8} 个
+                      </Badge>
+                    ) : null}
                   </div>
-                )}
-
-                {marketLoading ? (
-                  <div className="flex items-center justify-center rounded-2xl border border-white/[0.06] bg-black/10 py-12 text-[12px] text-muted-foreground">
-                    <Loader2 size={15} className="mr-2 animate-spin" />
-                    正在加载技能市场...
-                  </div>
-                ) : marketItems.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-white/[0.08] bg-black/10 p-6 text-center">
-                    <p className="text-[13px] font-medium">没有找到可展示的 Skills</p>
-                    <p className="mt-1 text-[12px] text-muted-foreground">
-                      {marketQuery.trim()
-                        ? "试试换一个关键词，或者直接输入准确 slug 安装。"
-                        : "腾讯 SkillHub 暂时没有返回推荐 Skills，可以直接输入 slug 安装。"}
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid gap-3 lg:grid-cols-2">
-                    {marketItems.map((item) => {
-                      const isInstalled = managedSkillNames.has(item.slug);
-                      const isBundled = openclawSkillNames.has(item.slug);
-                      const disabled = isInstalled || isBundled || Boolean(installingSlug);
-
-                      return (
-                        <Card key={`${item.marketplace}:${item.slug}`} className="border-white/[0.08] bg-black/15">
-                          <CardContent className="space-y-3 p-4">
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0 space-y-1">
-                                <div className="flex items-center gap-2">
-                                  <p className="truncate text-[13px] font-semibold">{item.displayName}</p>
-                                  <Badge className="border-0 bg-white/[0.06] px-1.5 py-0 text-[10px] text-muted-foreground">
-                                    腾讯 SkillHub
-                                  </Badge>
-                                </div>
-                                <p className="font-mono text-[11px] text-muted-foreground">{item.slug}{item.version ? ` · v${item.version}` : ""}</p>
-                              </div>
-                              <Button
-                                size="sm"
-                                disabled={disabled}
-                                onClick={() => void handleInstall(item.slug)}
-                              >
-                                {installingSlug === item.slug ? <Loader2 className="animate-spin" /> : <Download size={14} />}
-                                {isInstalled ? "已安装" : isBundled ? "已内置" : "安装"}
-                              </Button>
-                            </div>
-
-                            <p className="line-clamp-3 text-[12px] leading-relaxed text-muted-foreground">
-                              {item.summary || "这个技能还没有摘要说明。"}
-                            </p>
-
-                            <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-                              <span>来源：腾讯 SkillHub</span>
-                              <span>{formatRelativeTime(item.updatedAt)}</span>
-                            </div>
-                          </CardContent>
-                        </Card>
-                      );
-                    })}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <SectionHeader
-              title="已额外安装 Skills"
-              description={`这些目录位于 ${snapshot?.managedSkillsDir || "~/.openclaw/skills"}，可以删除后重新安装。`}
-            />
-
-            {managedSkills.length === 0 ? (
-              <Card className="border-dashed border-white/[0.08] bg-white/[0.02]">
-                <CardContent className="flex flex-col items-center justify-center py-14 text-center">
-                  <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-white/[0.05]">
-                    <PackageOpen size={24} className="text-muted-foreground" />
-                  </div>
-                  <h3 className="text-sm font-medium">还没有额外安装的 Skills</h3>
-                  <p className="mt-1 max-w-[420px] text-[12px] text-muted-foreground">
-                    OpenClaw 自带技能已经可以直接使用；需要第三方扩展时，再从上面的市场区按需安装。
-                  </p>
                 </CardContent>
               </Card>
-            ) : (
-              <div className="grid gap-3 lg:grid-cols-2">
-                {managedSkills.map((skill) => (
-                  <InstalledSkillCard
-                    key={skill.name}
-                    skill={skill}
-                    deleting={deleting === skill.name}
-                    onDelete={() => {
-                      setDeleteError("");
-                      setPendingDelete(skill);
-                    }}
+            )}
+
+            {moduleTab === "workspace" && (
+              workspaceSkills.length > 0 ? (
+                <>
+                  <SectionHeader
+                    title="工作区 Skills"
+                    description={`这些是当前工作区透出的自定义 Skills。工作区目录：${snapshot?.workspaceDir || "~/.openclaw/workspace"}`}
                   />
-                ))}
-              </div>
+                  <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+                    {workspaceSkills.map((skill) => (
+                      <AvailableSkillCard
+                        key={`${skill.source}:${skill.name}`}
+                        skill={skill}
+                        requirementDetailsLoading={requirementsLoading && !requirementsLoaded}
+                        installingRequirementKey={installingRequirementKey}
+                        onInstallRequirement={(hintId, hintLabel) => void handleInstallRequirement(skill, hintId, hintLabel)}
+                      />
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <Card className="border-dashed border-white/[0.08] bg-white/[0.02]">
+                  <CardContent className="flex flex-col items-center justify-center py-14 text-center">
+                    <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-white/[0.05]">
+                      <FolderOpen size={24} className="text-muted-foreground" />
+                    </div>
+                    <h3 className="text-sm font-medium">当前工作区还没有透出 Skills</h3>
+                    <p className="mt-1 max-w-[420px] text-[12px] text-muted-foreground">
+                      如果你在工作区里维护了自定义 Skills，它们会在这里集中展示。
+                    </p>
+                  </CardContent>
+                </Card>
+              )
+            )}
+
+            {moduleTab === "market" && (
+              <Card className="overflow-hidden border-white/[0.08] bg-[radial-gradient(circle_at_top_left,rgba(20,184,166,0.12),transparent_40%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))]">
+                <CardContent className="space-y-4 p-4">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <Blocks size={15} className="text-teal-300" />
+                        <h3 className="text-[14px] font-semibold">腾讯 SkillHub 安装</h3>
+                      </div>
+                      <p className="text-[12px] text-muted-foreground">
+                        这里只接腾讯 SkillHub。空白时展示推荐 Skills，输入关键词后直接搜索腾讯市场。
+                      </p>
+                    </div>
+                    <Button size="sm" variant="outline" asChild>
+                      <a href={TENCENT_MARKETPLACE.url} target="_blank" rel="noreferrer">
+                        <ExternalLink />
+                        打开 {TENCENT_MARKETPLACE.label}
+                      </a>
+                    </Button>
+                  </div>
+
+                  <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
+                    <div className="space-y-2">
+                      <label htmlFor="skill-market-search" className="text-[12px] font-medium text-foreground">
+                        搜索或输入 slug
+                      </label>
+                      <div className="relative">
+                        <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                        <Input
+                          id="skill-market-search"
+                          value={marketQuery}
+                          onChange={(event) => setMarketQuery(event.target.value)}
+                          placeholder="例如 weather、one-password、语音识别"
+                          className="h-10 border-white/[0.08] bg-black/20 pl-9"
+                        />
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">{TENCENT_MARKETPLACE.description}</p>
+                    </div>
+
+                    <div className="flex items-end">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={!canDirectInstall || Boolean(installingSlug)}
+                        onClick={() => void handleInstall(marketQuery.trim())}
+                      >
+                        {installingSlug === marketQuery.trim() ? <Loader2 className="animate-spin" /> : <Download size={14} />}
+                        按 slug 安装
+                      </Button>
+                    </div>
+                  </div>
+
+                  {marketError && (
+                    <div className="rounded-xl border border-red-500/20 bg-red-500/8 px-3 py-2.5 text-[12px] text-red-200">
+                      {marketError}
+                    </div>
+                  )}
+
+                  {marketMessage && (
+                    <div className="rounded-xl border border-teal-500/20 bg-teal-500/10 px-3 py-2.5 text-[12px] text-teal-100">
+                      {marketMessage}
+                    </div>
+                  )}
+
+                  {marketLoading ? (
+                    <div className="flex items-center justify-center rounded-2xl border border-white/[0.06] bg-black/10 py-12 text-[12px] text-muted-foreground">
+                      <Loader2 size={15} className="mr-2 animate-spin" />
+                      正在加载技能市场...
+                    </div>
+                  ) : marketItems.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-white/[0.08] bg-black/10 p-6 text-center">
+                      <p className="text-[13px] font-medium">没有找到可展示的 Skills</p>
+                      <p className="mt-1 text-[12px] text-muted-foreground">
+                        {marketQuery.trim()
+                          ? "试试换一个关键词，或者直接输入准确 slug 安装。"
+                          : "腾讯 SkillHub 暂时没有返回推荐 Skills，可以直接输入 slug 安装。"}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      {marketItems.map((item) => {
+                        const isInstalled = managedSkillNames.has(item.slug);
+                        const isBundled = openclawSkillNames.has(item.slug);
+                        const disabled = isInstalled || isBundled || Boolean(installingSlug);
+
+                        return (
+                          <Card key={`${item.marketplace}:${item.slug}`} className="border-white/[0.08] bg-black/15">
+                            <CardContent className="space-y-3 p-4">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0 space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <p className="truncate text-[13px] font-semibold">{item.displayName}</p>
+                                    <Badge className="border-0 bg-white/[0.06] px-1.5 py-0 text-[10px] text-muted-foreground">
+                                      腾讯 SkillHub
+                                    </Badge>
+                                  </div>
+                                  <p className="font-mono text-[11px] text-muted-foreground">{item.slug}{item.version ? ` · v${item.version}` : ""}</p>
+                                </div>
+                                <Button
+                                  size="sm"
+                                  disabled={disabled}
+                                  onClick={() => void handleInstall(item.slug)}
+                                >
+                                  {installingSlug === item.slug ? <Loader2 className="animate-spin" /> : <Download size={14} />}
+                                  {isInstalled ? "已安装" : isBundled ? "已内置" : "安装"}
+                                </Button>
+                              </div>
+
+                              <p className="line-clamp-3 text-[12px] leading-relaxed text-muted-foreground">
+                                {item.summary || "这个技能还没有摘要说明。"}
+                              </p>
+
+                              <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                                <span>来源：腾讯 SkillHub</span>
+                                <span>{formatRelativeTime(item.updatedAt)}</span>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        );
+                      })}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {moduleTab === "installed" && (
+              <>
+                <SectionHeader
+                  title="已额外安装 Skills"
+                  description={`这些目录位于 ${snapshot?.managedSkillsDir || "~/.openclaw/skills"}，可以删除后重新安装。`}
+                />
+
+                {managedSkills.length === 0 ? (
+                  <Card className="border-dashed border-white/[0.08] bg-white/[0.02]">
+                    <CardContent className="flex flex-col items-center justify-center py-14 text-center">
+                      <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-white/[0.05]">
+                        <PackageOpen size={24} className="text-muted-foreground" />
+                      </div>
+                      <h3 className="text-sm font-medium">还没有额外安装的 Skills</h3>
+                      <p className="mt-1 max-w-[420px] text-[12px] text-muted-foreground">
+                        OpenClaw 自带技能已经可以直接使用；需要第三方扩展时，再从“市场”模块按需安装。
+                      </p>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    {managedSkills.map((skill) => (
+                      <InstalledSkillCard
+                        key={skill.name}
+                        skill={skill}
+                        deleting={deleting === skill.name}
+                        onDelete={() => {
+                          setDeleteError("");
+                          setPendingDelete(skill);
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
+              </>
             )}
           </>
         )}
