@@ -771,8 +771,10 @@ function ProviderCard({ provider, primaryModel, onDelete, onSetPrimary, onRemove
   settingPrimaryRef: string;
 }) {
   const hasPrimaryModel = provider.models.some((model) => `${provider.name}/${model.id}` === primaryModel);
-  const [expanded, setExpanded] = useState(hasPrimaryModel);
+  const [expanded, setExpanded] = useState(false);
   const sortedModels = [...provider.models].sort((a, b) => compareModels(provider.name, a, b, primaryModel));
+  const primaryModelEntry = sortedModels.find((model) => `${provider.name}/${model.id}` === primaryModel) ?? null;
+  const previewModelIds = sortedModels.slice(0, 3).map((model) => model.id);
 
   const maskedKey = provider.api_key
     ? `${provider.api_key.slice(0, 6)}...${provider.api_key.slice(-4)}`
@@ -817,6 +819,27 @@ function ProviderCard({ provider, primaryModel, onDelete, onSetPrimary, onRemove
                     <Key size={9} />{maskedKey}
                   </span>
                 </>
+              )}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {primaryModelEntry ? (
+                <Badge className="h-5 border-0 bg-amber-500/10 px-2 text-[10px] text-amber-300">
+                  主模型 {primaryModelEntry.id}
+                </Badge>
+              ) : (
+                <Badge className="h-5 border-0 bg-white/[0.06] px-2 text-[10px] text-muted-foreground">
+                  尚未设置主模型
+                </Badge>
+              )}
+              {previewModelIds.map((id) => (
+                <Badge key={id} className="h-5 border-0 bg-white/[0.06] px-2 text-[10px] text-muted-foreground">
+                  {id}
+                </Badge>
+              ))}
+              {provider.models.length > previewModelIds.length && (
+                <Badge className="h-5 border-0 bg-white/[0.06] px-2 text-[10px] text-muted-foreground">
+                  +{provider.models.length - previewModelIds.length}
+                </Badge>
               )}
             </div>
           </div>
@@ -866,52 +889,113 @@ function ProviderCard({ provider, primaryModel, onDelete, onSetPrimary, onRemove
 
         {expanded && provider.models.length > 0 && (
           <div className="border-t border-white/[0.06]">
-            <div className="flex items-center justify-between gap-3 px-4 py-2.5 text-[11px] text-muted-foreground">
-              <span>主模型会固定显示在最前面，右侧按钮可直接切换。</span>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] px-4 py-3 text-[11px] text-muted-foreground">
+              <div className="flex flex-wrap items-center gap-2">
+                <span>默认收起 Provider，展开后再集中管理模型。</span>
+                {primaryModelEntry && (
+                  <Badge className="h-5 border-0 bg-amber-500/10 px-2 text-[10px] text-amber-300">
+                    当前主模型：{primaryModelEntry.id}
+                  </Badge>
+                )}
+              </div>
               <span>{provider.models.length} 个模型</span>
             </div>
-            <div className="max-h-[300px] overflow-auto">
+            <div className="max-h-[420px] overflow-auto p-3">
+              <div className="grid gap-3 xl:grid-cols-2">
               {sortedModels.map((m) => {
                 const ref = `${provider.name}/${m.id}`;
                 const isPrimary = ref === primaryModel;
                 const isSettingPrimary = ref === settingPrimaryRef;
+                const supportsImage = m.input.includes("image");
                 return (
                   <div
                     key={m.id}
-                    className={`px-4 py-2.5 text-[12px] transition-colors ${
-                      isPrimary ? "bg-amber-500/6" : "hover:bg-white/[0.02]"
+                    className={`rounded-xl border p-3.5 text-[12px] transition-colors ${
+                      isPrimary
+                        ? "border-amber-500/20 bg-amber-500/[0.06]"
+                        : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.14] hover:bg-white/[0.04]"
                     }`}
                   >
-                    <div className="flex items-center gap-2.5">
-                      <Cpu size={11} className="text-muted-foreground shrink-0" />
-                      <span className={`font-mono flex-1 min-w-0 truncate ${isPrimary ? "text-foreground" : "text-foreground/80"}`}>{m.id}</span>
-                      {m.reasoning && <Badge className="text-[9px] h-3.5 px-1 border-0 bg-amber-500/15 text-amber-400">R</Badge>}
-                      {m.input.includes("image") && <Badge className="text-[9px] h-3.5 px-1 border-0 bg-sky-500/15 text-sky-400">V</Badge>}
-                      <span className="text-[10px] text-muted-foreground/50 w-14 text-right shrink-0 font-mono">{(m.context_window / 1000).toFixed(0)}k</span>
-                    </div>
-                    <div className="mt-2 flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                        {isPrimary ? (
-                          <>
-                            <Star size={11} className="text-amber-400 shrink-0" />
-                            <span className="text-amber-300">当前主模型</span>
-                          </>
-                        ) : (
-                          <span>可设为当前主模型</span>
-                        )}
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+                            isPrimary ? "bg-amber-500/12" : "bg-white/[0.06]"
+                          }`}>
+                            <Cpu size={13} className={isPrimary ? "text-amber-300" : "text-muted-foreground"} />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className={`font-mono text-[12px] ${isPrimary ? "text-foreground" : "text-foreground/85"}`}>{m.id}</span>
+                              {isPrimary && (
+                                <Badge className="h-5 border-0 bg-amber-500/15 px-2 text-[10px] text-amber-300">
+                                  主模型
+                                </Badge>
+                              )}
+                            </div>
+                            <p className="mt-1 text-[11px] text-muted-foreground">
+                              {isPrimary ? "当前默认会优先使用这个模型。" : "可独立设为主模型，也可以直接从这个 Provider 里移除。"}
+                            </p>
+                          </div>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
+
+                      {isPrimary ? (
+                        <Badge className="h-5 shrink-0 border-0 bg-amber-500/10 px-2 text-[10px] text-amber-300">
+                          正在使用
+                        </Badge>
+                      ) : null}
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <Badge className="h-5 border-0 bg-white/[0.06] px-2 text-[10px] text-muted-foreground">
+                        上下文 {(m.context_window / 1000).toFixed(0)}k
+                      </Badge>
+                      {m.max_tokens > 0 && (
+                        <Badge className="h-5 border-0 bg-white/[0.06] px-2 text-[10px] text-muted-foreground">
+                          输出 {(m.max_tokens / 1000).toFixed(0)}k
+                        </Badge>
+                      )}
+                      {m.reasoning && (
+                        <Badge className="h-5 border-0 bg-amber-500/10 px-2 text-[10px] text-amber-300">
+                          推理
+                        </Badge>
+                      )}
+                      {supportsImage && (
+                        <Badge className="h-5 border-0 bg-sky-500/10 px-2 text-[10px] text-sky-300">
+                          图像输入
+                        </Badge>
+                      )}
+                      {!m.reasoning && !supportsImage && (
+                        <Badge className="h-5 border-0 bg-white/[0.06] px-2 text-[10px] text-muted-foreground">
+                          标准文本模型
+                        </Badge>
+                      )}
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.06] pt-3">
+                      <div className="text-[11px] text-muted-foreground">
+                        {isPrimary ? "主模型固定置顶显示。" : "建议先确认能力标签，再决定是否设为主模型。"}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
                         {isPrimary ? (
-                          <Badge className="border-0 bg-amber-500/15 text-[10px] text-amber-400">
-                            正在使用
-                          </Badge>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 text-[11px]"
+                            disabled
+                          >
+                            <Star size={11} />
+                            当前主模型
+                          </Button>
                         ) : (
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          className="h-7 text-[11px]"
-                          disabled={Boolean(settingPrimaryRef)}
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 text-[11px]"
+                            disabled={Boolean(settingPrimaryRef)}
                             onClick={async (event) => {
                               event.stopPropagation();
                               await onSetPrimary(ref);
@@ -925,7 +1009,7 @@ function ProviderCard({ provider, primaryModel, onDelete, onSetPrimary, onRemove
                           type="button"
                           size="sm"
                           variant="ghost"
-                          className="h-7 text-[11px] text-muted-foreground hover:text-destructive"
+                          className="h-8 text-[11px] text-muted-foreground hover:text-destructive"
                           onClick={(event) => {
                             event.preventDefault();
                             event.stopPropagation();
@@ -940,6 +1024,7 @@ function ProviderCard({ provider, primaryModel, onDelete, onSetPrimary, onRemove
                   </div>
                 );
               })}
+              </div>
             </div>
           </div>
         )}
