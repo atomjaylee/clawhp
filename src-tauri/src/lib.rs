@@ -9654,6 +9654,170 @@ async fn start_gateway_with_recovery(app: AppHandle, port: Option<u16>) -> Comma
 }
 
 #[tauri::command]
+async fn restart_gateway_with_recovery(app: AppHandle, port: Option<u16>) -> CommandResult {
+    let port = port.unwrap_or(18789);
+
+    tokio::task::spawn_blocking(move || {
+        let restart_args = vec!["gateway".to_string(), "restart".to_string()];
+        let stop_args = vec!["gateway".to_string(), "stop".to_string()];
+        let start_args = vec!["gateway".to_string(), "start".to_string()];
+        let doctor_args = vec!["doctor".to_string(), "--fix".to_string()];
+
+        let _ = app.emit(
+            "gateway-log",
+            InstallEvent {
+                level: "info".into(),
+                message: "正在重启网关...".into(),
+            },
+        );
+
+        let restart = run_logged_openclaw_command(
+            &app,
+            "gateway-log",
+            &restart_args,
+            Duration::from_secs(25),
+        );
+        let (ready_after_restart, _) = wait_for_gateway_ready(port, 6, Duration::from_secs(2));
+
+        if ready_after_restart {
+            let _ = app.emit(
+                "gateway-log",
+                InstallEvent {
+                    level: "info".into(),
+                    message: format!("网关已重启，端口 {} 就绪", port),
+                },
+            );
+            return CommandResult {
+                success: true,
+                stdout: format!("网关已重启，端口 {} 已恢复", port),
+                stderr: String::new(),
+                code: Some(0),
+            };
+        }
+
+        let _ = app.emit(
+            "gateway-log",
+            InstallEvent {
+                level: "warn".into(),
+                message: "官方重启未确认成功，正在尝试停止后重新启动...".into(),
+            },
+        );
+
+        let stop = run_logged_openclaw_command(
+            &app,
+            "gateway-log",
+            &stop_args,
+            Duration::from_secs(15),
+        );
+        std::thread::sleep(Duration::from_millis(1200));
+
+        let start = run_logged_openclaw_command(
+            &app,
+            "gateway-log",
+            &start_args,
+            Duration::from_secs(20),
+        );
+        let (ready_after_start, _) = wait_for_gateway_ready(port, 6, Duration::from_secs(2));
+
+        if ready_after_start {
+            let _ = app.emit(
+                "gateway-log",
+                InstallEvent {
+                    level: "info".into(),
+                    message: format!("网关已恢复运行，端口 {} 就绪", port),
+                },
+            );
+            return CommandResult {
+                success: true,
+                stdout: format!("网关已恢复运行，端口 {} 已就绪", port),
+                stderr: String::new(),
+                code: Some(0),
+            };
+        }
+
+        let _ = app.emit(
+            "gateway-log",
+            InstallEvent {
+                level: "warn".into(),
+                message: "重启仍未成功，正在尝试自动修复 (openclaw doctor --fix)...".into(),
+            },
+        );
+
+        let doctor = run_logged_openclaw_command(
+            &app,
+            "gateway-log",
+            &doctor_args,
+            Duration::from_secs(30),
+        );
+        if doctor.success {
+            let _ = app.emit(
+                "gateway-log",
+                InstallEvent {
+                    level: "info".into(),
+                    message: "修复完成，正在再次启动网关...".into(),
+                },
+            );
+
+            let _ = run_logged_openclaw_command(
+                &app,
+                "gateway-log",
+                &start_args,
+                Duration::from_secs(20),
+            );
+            let (ready_after_fix, _) = wait_for_gateway_ready(port, 6, Duration::from_secs(2));
+
+            if ready_after_fix {
+                let _ = app.emit(
+                    "gateway-log",
+                    InstallEvent {
+                        level: "info".into(),
+                        message: format!("修复后网关重启成功，端口 {} 就绪", port),
+                    },
+                );
+                return CommandResult {
+                    success: true,
+                    stdout: format!("网关重启成功，端口 {} 已恢复", port),
+                    stderr: String::new(),
+                    code: Some(0),
+                };
+            }
+        }
+
+        let _ = app.emit(
+            "gateway-log",
+            InstallEvent {
+                level: "error".into(),
+                message: "网关重启失败，请到设置页检查安装状态或手动执行 openclaw doctor --fix".into(),
+            },
+        );
+
+        CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: if !doctor.stderr.is_empty() {
+                doctor.stderr
+            } else if !start.stderr.is_empty() {
+                start.stderr
+            } else if !stop.stderr.is_empty() {
+                stop.stderr
+            } else if !restart.stderr.is_empty() {
+                restart.stderr
+            } else {
+                "网关重启失败".into()
+            },
+            code: Some(1),
+        }
+    })
+    .await
+    .unwrap_or_else(|e| CommandResult {
+        success: false,
+        stdout: String::new(),
+        stderr: format!("Task panic: {}", e),
+        code: None,
+    })
+}
+
+#[tauri::command]
 fn get_gateway_logs() -> CommandResult {
     let log_path = gateway_log_path();
     match std::fs::read_to_string(&log_path) {
@@ -9772,6 +9936,7 @@ pub fn run() {
             run_shell_command,
             start_gateway,
             start_gateway_with_recovery,
+            restart_gateway_with_recovery,
             check_gateway_port,
             get_gateway_status_snapshot,
             get_runtime_status_snapshot,

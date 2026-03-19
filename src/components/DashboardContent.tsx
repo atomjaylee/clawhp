@@ -15,12 +15,10 @@ import {
   RefreshCw,
   Server,
   Square,
-  Terminal,
   Wrench,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import ModuleTabs, { type ModuleTabItem } from "@/components/ui/module-tabs";
 import PageShell from "@/components/PageShell";
@@ -31,7 +29,7 @@ interface Props {
   onNavigate?: (tab: DashboardTab) => void;
 }
 
-type GatewayStatus = "unknown" | "checking" | "running" | "stopped" | "starting" | "stopping" | "recovering";
+type GatewayStatus = "unknown" | "checking" | "running" | "stopped" | "starting" | "stopping" | "restarting" | "recovering";
 type Tone = "neutral" | "good" | "warn" | "danger";
 type DashboardModuleTab = "overview" | "actions" | "system";
 
@@ -121,8 +119,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
 
   const [gwStatus, setGwStatus] = useState<GatewayStatus>("unknown");
   const [gwMessage, setGwMessage] = useState("");
-  const [gwLogs, setGwLogs] = useState<string[]>([]);
-  const [showLogs, setShowLogs] = useState(false);
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState("");
   const [gatewaySnapshot, setGatewaySnapshot] = useState<GatewaySnapshot | null>(null);
@@ -253,7 +249,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   useEffect(() => {
     const unlisten = listen<GatewayLogEvent>("gateway-log", (event) => {
       const { level, message } = event.payload;
-      setGwLogs((prev) => [...prev.slice(-49), `[${level}] ${message}`]);
 
       if (level === "info" && message.includes("就绪")) {
         setGwStatus("running");
@@ -277,7 +272,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   const handleStartGateway = async () => {
     setGwStatus("starting");
     setGwMessage("");
-    setGwLogs([]);
     try {
       const r: CommandResult = await invoke("start_gateway_with_recovery", { port: gatewayPort });
       if (r.success) {
@@ -296,6 +290,31 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
     }
   };
 
+  const handleRestartGateway = async () => {
+    setGwStatus("restarting");
+    setGwMessage("");
+    try {
+      const r: CommandResult = await invoke("restart_gateway_with_recovery", { port: gatewayPort });
+      if (r.success) {
+        setGwStatus("running");
+        setGwMessage(firstMeaningfulLine(r.stdout) ?? "网关已重启");
+      } else {
+        setGwStatus("stopped");
+        setGwMessage(r.stderr || "重启失败");
+      }
+    } catch (e) {
+      setGwStatus("stopped");
+      setGwMessage(`${e}`);
+    } finally {
+      await checkGateway();
+      await Promise.all([
+        refreshSnapshots(),
+        refreshConfiguredChannels(),
+        refreshConfiguredPrimaryModel(),
+      ]);
+    }
+  };
+
   const handleStopGateway = async () => {
     setGwStatus("stopping");
     setGwMessage("");
@@ -307,24 +326,12 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
     } finally {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       await checkGateway();
-      await refreshSnapshots();
+      await Promise.all([
+        refreshSnapshots(),
+        refreshConfiguredChannels(),
+        refreshConfiguredPrimaryModel(),
+      ]);
     }
-  };
-
-  const handleViewLogs = async () => {
-    if (showLogs) {
-      setShowLogs(false);
-      return;
-    }
-    try {
-      const r: CommandResult = await invoke("get_gateway_logs");
-      if (r.success) {
-        setGwLogs(r.stdout.split("\n"));
-      }
-    } catch {
-      // ignore
-    }
-    setShowLogs(true);
   };
 
   const handleOpenDashboard = async () => {
@@ -377,7 +384,8 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   const topFinding = securityFindings.find((finding) => finding.severity !== "info") ?? securityFindings[0];
   const gatewayProbeError = firstMeaningfulLine(gatewaySnapshot?.rpc?.error);
   const gwRunning = gwStatus === "running";
-  const gwBusy = gwStatus === "starting" || gwStatus === "stopping" || gwStatus === "checking" || gwStatus === "recovering";
+  const gwBusy = gwStatus === "starting" || gwStatus === "stopping" || gwStatus === "restarting" || gwStatus === "checking" || gwStatus === "recovering";
+  const showGatewayRuntimeActions = gwStatus === "running" || gwStatus === "stopping" || gwStatus === "restarting" || gwStatus === "recovering";
   const riskCount = (securitySummary?.critical ?? 0) + (securitySummary?.warn ?? 0);
   const modelConfigured = defaultModel !== "未检测";
   const controlUiReady = gwRunning && gatewaySnapshot?.rpc?.ok !== false;
@@ -502,6 +510,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
                       {gwStatus === "checking" ? "检测中"
                         : gwStatus === "starting" ? "启动中"
                         : gwStatus === "stopping" ? "停止中"
+                        : gwStatus === "restarting" ? "重启中"
                         : gwStatus === "recovering" ? "自动修复中"
                         : gwRunning ? "网关运行中"
                         : "网关未运行"}
@@ -524,17 +533,23 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
                   {openingDashboard ? <Loader2 size={13} className="animate-spin" /> : <Globe size={13} />}
                   {openingDashboard ? "打开中..." : "打开 Control UI"}
                 </Button>
-                {(gwStatus === "running" || gwStatus === "stopping") ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleStopGateway}
-                    disabled={gwBusy}
-                    className="border-red-500/20 text-red-400 hover:bg-red-500/10 hover:text-red-400"
-                  >
-                    {gwStatus === "stopping" ? <Loader2 size={13} className="animate-spin" /> : <Square size={13} />}
-                    停止
-                  </Button>
+                {showGatewayRuntimeActions ? (
+                  <>
+                    <Button size="sm" variant="outline" onClick={handleRestartGateway} disabled={gwBusy}>
+                      {gwStatus === "restarting" ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                      {gwStatus === "restarting" ? "重启中..." : "重启网关"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleStopGateway}
+                      disabled={gwBusy}
+                      className="border-red-500/20 text-red-400 hover:bg-red-500/10 hover:text-red-400"
+                    >
+                      {gwStatus === "stopping" ? <Loader2 size={13} className="animate-spin" /> : <Square size={13} />}
+                      停止
+                    </Button>
+                  </>
                 ) : (
                   <Button size="sm" variant="outline" onClick={handleStartGateway} disabled={gwBusy}>
                     {gwStatus === "starting" ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
@@ -553,15 +568,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
                   title="刷新状态"
                 >
                   <RefreshCw size={13} />
-                </Button>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-8 w-8 text-muted-foreground"
-                  onClick={handleViewLogs}
-                  title="查看网关日志"
-                >
-                  <FileText size={13} />
                 </Button>
               </div>
             </div>
@@ -586,28 +592,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
                 title={gwRunning ? "网关进程在运行，但控制面板探针返回异常" : "当前无法连接到本地网关"}
                 body={gatewayProbeError}
               />
-            )}
-
-            {showLogs && gwLogs.length > 0 && (
-              <div className="mt-3 rounded-lg bg-white/[0.03] border border-white/[0.06] overflow-hidden">
-                <div className="flex items-center justify-between px-3 py-1.5 border-b border-white/[0.06]">
-                  <div className="flex items-center gap-1.5">
-                    <Terminal size={11} className="text-muted-foreground" />
-                    <span className="text-[11px] text-muted-foreground font-medium">网关日志</span>
-                  </div>
-                  <button
-                    onClick={() => setShowLogs(false)}
-                    className="text-[10px] text-muted-foreground hover:text-foreground"
-                  >
-                    关闭
-                  </button>
-                </div>
-                <ScrollArea className="max-h-40">
-                  <pre className="p-2.5 text-[10px] font-mono text-muted-foreground whitespace-pre-wrap">
-                    {gwLogs.join("\n")}
-                  </pre>
-                </ScrollArea>
-              </div>
             )}
           </CardContent>
         </Card>
