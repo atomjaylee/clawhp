@@ -1063,7 +1063,7 @@ export default function ChannelsPage() {
   }, [applyFeishuBindingSuccess, currentBoundAgentId, editingAccountId, editingFeishuAccount, existingBindingForm, selectedAgentId]);
 
   useEffect(() => {
-    if (bindingPhase !== "waiting" || !authSession) {
+    if (!authSession) {
       return undefined;
     }
 
@@ -1094,6 +1094,8 @@ export default function ChannelsPage() {
 
         if (!result.success) {
           setBindingPhase("idle");
+          setAuthSession(null);
+          setAuthQrDataUrl("");
           setBindingError(result.stderr || "飞书扫码状态获取失败");
           return;
         }
@@ -1101,6 +1103,8 @@ export default function ChannelsPage() {
         const payload = parseJsonValue<FeishuAuthPollPayload | null>(result.stdout, null);
         if (!payload) {
           setBindingPhase("idle");
+          setAuthSession(null);
+          setAuthQrDataUrl("");
           setBindingError("飞书扫码状态解析失败");
           return;
         }
@@ -1132,6 +1136,8 @@ export default function ChannelsPage() {
 
           if (!bindingResult.success) {
             setBindingPhase("idle");
+            setAuthSession(null);
+            setAuthQrDataUrl("");
             setBindingError(bindingResult.stderr || "飞书绑定失败");
             return;
           }
@@ -1159,6 +1165,8 @@ export default function ChannelsPage() {
         }
 
         setBindingPhase("idle");
+        setAuthSession(null);
+        setAuthQrDataUrl("");
         if (payload.status === "denied") {
           setBindingError("你在飞书里取消了授权，请重新扫码。");
         } else if (payload.status === "expired") {
@@ -1169,6 +1177,8 @@ export default function ChannelsPage() {
       } catch (e) {
         if (!cancelled) {
           setBindingPhase("idle");
+          setAuthSession(null);
+          setAuthQrDataUrl("");
           setBindingError(`${e}`);
         }
       }
@@ -1182,7 +1192,7 @@ export default function ChannelsPage() {
         clearTimeout(timer);
       }
     };
-  }, [applyFeishuBindingSuccess, authSession, bindingPhase, editingAccountId, editingFeishuAccount, selectedAgentId]);
+  }, [applyFeishuBindingSuccess, authSession, editingAccountId, editingFeishuAccount, selectedAgentId]);
 
   const showInstallLogs = installPhase === "running" || installLogs.length > 0;
   const moduleTabs: ModuleTabItem<ChannelsModuleTab>[] = [
