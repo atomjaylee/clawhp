@@ -13,8 +13,6 @@ import ModuleTabs, { type ModuleTabItem } from "@/components/ui/module-tabs";
 import PageShell from "@/components/PageShell";
 import type { SystemInfo, CommandResult, LogEntry } from "@/types";
 
-const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => setTimeout(r, 0)));
-
 interface UninstallEvent {
   level: string;
   message: string;
@@ -65,6 +63,7 @@ interface Props {
 }
 
 type SettingsModuleTab = "maintenance" | "paths" | "danger";
+type MaintenanceTool = "doctor" | "repair" | "status" | "dashboard";
 
 export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninstallComplete }: Props) {
   const openclawHome = systemInfo.openclaw_home_path || "~/.openclaw";
@@ -92,8 +91,10 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
   const [githubReleaseLoading, setGithubReleaseLoading] = useState(false);
   const [githubReleaseError, setGithubReleaseError] = useState("");
   const [openingUpdateTerminal, setOpeningUpdateTerminal] = useState(false);
-  const [onboarding, setOnboarding] = useState(false);
-  const [onboardOutput, setOnboardOutput] = useState("");
+  const [maintenanceRunning, setMaintenanceRunning] = useState<MaintenanceTool | "">("");
+  const [maintenanceOutput, setMaintenanceOutput] = useState("");
+  const [maintenanceTitle, setMaintenanceTitle] = useState("OpenClaw 工具输出");
+  const [maintenanceSuccess, setMaintenanceSuccess] = useState<boolean | null>(null);
   const updateLogEndRef = useRef<HTMLDivElement>(null);
   const updateProgressRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -307,13 +308,43 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
     });
   };
 
-  const handleOnboard = async () => {
-    setOnboarding(true); setOnboardOutput(""); await nextFrame();
+  const runMaintenanceTool = async (tool: MaintenanceTool) => {
+    setMaintenanceRunning(tool);
+    setMaintenanceSuccess(null);
+    setMaintenanceOutput("");
+    setMaintenanceTitle(getMaintenanceToolTitle(tool));
+
     try {
-      const r: CommandResult = await invoke("run_onboard");
-      setOnboardOutput(r.stdout || r.stderr || (r.success ? "完成" : "失败"));
-    } catch (e) { setOnboardOutput(`${e}`); }
-    finally { setOnboarding(false); }
+      let result: CommandResult;
+
+      switch (tool) {
+        case "repair":
+          result = await invoke("run_openclaw_command", { args: ["doctor", "--fix"] });
+          break;
+        case "status":
+          result = await invoke("run_openclaw_command", { args: ["status", "--json"] });
+          break;
+        case "dashboard":
+          result = await invoke("open_dashboard");
+          break;
+        case "doctor":
+        default:
+          result = await invoke("run_openclaw_command", { args: ["doctor"] });
+          break;
+      }
+
+      setMaintenanceSuccess(result.success);
+      setMaintenanceOutput(formatMaintenanceOutput(tool, result));
+
+      if (tool !== "dashboard") {
+        void refreshSystemInfo();
+      }
+    } catch (error) {
+      setMaintenanceSuccess(false);
+      setMaintenanceOutput(`${error}`);
+    } finally {
+      setMaintenanceRunning("");
+    }
   };
 
   const currentComparableVersion = extractComparableVersion(currentVersion);
@@ -357,7 +388,7 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
           <div>
             <h2 className="text-sm font-semibold">设置与维护</h2>
             <p className="text-[11px] text-muted-foreground">
-              当前版本 {currentVersion}，集中管理更新、路径和卸载操作。
+              当前版本 {currentVersion}，集中管理维护工具、更新、路径和卸载操作。
             </p>
           </div>
           <Button size="sm" variant="outline" onClick={() => { void refreshSystemInfo(); void refreshUpdateSignals(); }} disabled={updateStatusLoading || githubReleaseLoading || updatePhase === "running" || uninstallPhase === "running"}>
@@ -372,7 +403,7 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
         {moduleTab === "maintenance" && (
           <>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {/* Onboard */}
+          {/* Maintenance */}
           <Card>
             <CardContent className="p-5">
               <div className="flex items-center gap-2.5 mb-3">
@@ -380,16 +411,97 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
                   <Wand2 size={15} className="text-teal-400" />
                 </div>
                 <div>
-                  <h3 className="text-[13px] font-semibold">引导向导</h3>
-                  <p className="text-[11px] text-muted-foreground">配置 Auth、网关和后台服务</p>
+                  <h3 className="text-[13px] font-semibold">OpenClaw 工具箱</h3>
+                  <p className="text-[11px] text-muted-foreground">把检查、修复、状态查看和 Control UI 入口集中放在这里</p>
                 </div>
               </div>
-              <Button size="sm" onClick={handleOnboard} disabled={onboarding} className="mb-3">
-                {onboarding ? <Loader2 className="animate-spin" /> : <Wand2 />}
-                {onboarding ? "运行中..." : "openclaw onboard"}
-              </Button>
-              {onboardOutput && (
-                <pre className="rounded-lg bg-white/[0.03] border border-white/[0.06] p-3 text-[11px] font-mono text-muted-foreground whitespace-pre-wrap max-h-40 overflow-auto">{onboardOutput}</pre>
+
+              <div className="grid grid-cols-3 gap-2 mb-4">
+                <MetricCard
+                  label="Doctor"
+                  value={systemInfo.openclaw_doctor_ok ? "通过" : "待修复"}
+                  tone={systemInfo.openclaw_doctor_ok ? "good" : "warn"}
+                />
+                <MetricCard
+                  label="配置文件"
+                  value={systemInfo.openclaw_config_exists ? "已发现" : "缺失"}
+                  tone={systemInfo.openclaw_config_exists ? "neutral" : "warn"}
+                />
+                <MetricCard
+                  label="网关端口"
+                  value={`${systemInfo.gateway_port ?? 18789}`}
+                  tone="neutral"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void runMaintenanceTool("doctor")}
+                  disabled={Boolean(maintenanceRunning)}
+                >
+                  {maintenanceRunning === "doctor" ? <Loader2 className="animate-spin" /> : <CheckCircle2 />}
+                  健康检查
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => void runMaintenanceTool("repair")}
+                  disabled={Boolean(maintenanceRunning)}
+                >
+                  {maintenanceRunning === "repair" ? <Loader2 className="animate-spin" /> : <Wand2 />}
+                  自动修复
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void runMaintenanceTool("status")}
+                  disabled={Boolean(maintenanceRunning)}
+                >
+                  {maintenanceRunning === "status" ? <Loader2 className="animate-spin" /> : <Terminal />}
+                  读取状态
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void runMaintenanceTool("dashboard")}
+                  disabled={Boolean(maintenanceRunning)}
+                >
+                  {maintenanceRunning === "dashboard" ? <Loader2 className="animate-spin" /> : <ExternalLink />}
+                  打开 Control UI
+                </Button>
+              </div>
+
+              <div className="mt-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-[11px] text-muted-foreground">
+                自动修复会执行 <code className="font-mono text-foreground/75">openclaw doctor --fix</code>，完成后会自动刷新安装状态。
+              </div>
+
+              {(maintenanceOutput || maintenanceRunning) && (
+                <div className="mt-4 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[12px] font-medium text-foreground/85">{maintenanceTitle}</p>
+                      <p className="text-[11px] text-muted-foreground">
+                        {maintenanceRunning
+                          ? "命令正在执行，请稍等。"
+                          : maintenanceSuccess === null
+                            ? "最近一次工具输出。"
+                            : maintenanceSuccess
+                              ? "命令执行完成。"
+                              : "命令执行失败，请根据输出继续处理。"}
+                      </p>
+                    </div>
+                    {maintenanceSuccess !== null && !maintenanceRunning && (
+                      <span className={`flex items-center gap-1.5 text-[12px] ${
+                        maintenanceSuccess ? "text-emerald-400" : "text-amber-400"
+                      }`}>
+                        {maintenanceSuccess ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
+                        {maintenanceSuccess ? "成功" : "失败"}
+                      </span>
+                    )}
+                  </div>
+                  <pre className="rounded-lg bg-white/[0.03] border border-white/[0.06] p-3 text-[11px] font-mono text-muted-foreground whitespace-pre-wrap max-h-56 overflow-auto">{maintenanceOutput || "处理中..."}</pre>
+                </div>
               )}
             </CardContent>
           </Card>
@@ -753,6 +865,47 @@ function parseGithubRelease(result: CommandResult): GithubReleaseSnapshot | null
   } catch {
     return null;
   }
+}
+
+function getMaintenanceToolTitle(tool: MaintenanceTool) {
+  switch (tool) {
+    case "repair":
+      return "自动修复输出";
+    case "status":
+      return "运行状态快照";
+    case "dashboard":
+      return "Control UI 打开结果";
+    case "doctor":
+    default:
+      return "健康检查输出";
+  }
+}
+
+function formatMaintenanceOutput(tool: MaintenanceTool, result: CommandResult) {
+  if (tool === "dashboard") {
+    if (result.success) {
+      return result.stdout.trim() || "已尝试通过 `openclaw dashboard` 打开 Control UI。";
+    }
+    return result.stderr.trim() || "打开 Control UI 失败。";
+  }
+
+  const stdout = result.stdout.trim();
+  const stderr = result.stderr.trim();
+
+  if (tool === "status" && stdout) {
+    try {
+      return JSON.stringify(JSON.parse(stdout), null, 2);
+    } catch {
+      // fall through to the plain output
+    }
+  }
+
+  const combined = [stdout, stderr].filter(Boolean).join("\n\n");
+  if (combined) {
+    return combined;
+  }
+
+  return result.success ? "命令执行完成，没有返回额外输出。" : "命令执行失败，但没有返回更多信息。";
 }
 
 function extractComparableVersion(value?: string | null) {

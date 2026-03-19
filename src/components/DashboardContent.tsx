@@ -436,7 +436,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   if (!systemInfo.openclaw_doctor_ok) {
     attentionItems.push({
       title: "健康检查还没通过",
-      body: "建议先去设置页运行 onboard 或检查安装状态，避免后续功能一会儿能用一会儿不能用。",
+      body: "建议先去设置页做健康检查或自动修复，避免后续功能一会儿能用一会儿不能用。",
       actionLabel: "打开设置",
       onAction: () => onNavigate?.("settings"),
     });
@@ -706,7 +706,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
                 <ActionLinkCard
                   icon={Wrench}
                   title="设置与恢复"
-                  desc="运行 onboard、检查安装和处理异常"
+                  desc="运行健康检查、自动修复和处理异常"
                   onClick={onNavigate ? () => onNavigate("settings") : undefined}
                 />
                 <ActionLinkCard
@@ -770,7 +770,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
                   <InlineNote
                     tone="warn"
                     title="健康检查没通过时，先别折腾复杂功能"
-                    body="先去设置页重新运行 onboard 或检查安装问题，通常比在首页看很多状态更有效。"
+                    body="先去设置页做健康检查或自动修复，通常比在首页看很多状态更有效。"
                   />
                 )}
                 {riskCount > 0 && topFinding && (
