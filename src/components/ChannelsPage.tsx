@@ -29,6 +29,8 @@ interface ChannelEntry {
   account: string;
   name: string;
   enabled: boolean;
+  boundAgentId?: string | null;
+  boundAgentName?: string | null;
 }
 
 interface ChannelStatus {
@@ -254,6 +256,8 @@ function extractChannelEntries(data: Record<string, unknown>) {
         account: accountId,
         name: (account.name as string) ?? accountId,
         enabled: account.enabled !== false,
+        boundAgentId: typeof account.boundAgentId === "string" ? account.boundAgentId : null,
+        boundAgentName: typeof account.boundAgentName === "string" ? account.boundAgentName : null,
       });
     }
   }
@@ -266,13 +270,6 @@ function extractChannelEntries(data: Record<string, unknown>) {
   });
 
   return entries;
-}
-
-function shouldRefreshFeishuDisplayNames(entries: ChannelEntry[]) {
-  return entries.some((entry) => (
-    entry.channel === "feishu"
-    && (!entry.name.trim() || entry.name.trim() === entry.account.trim())
-  ));
 }
 
 export default function ChannelsPage() {
@@ -381,14 +378,6 @@ export default function ChannelsPage() {
 
     return labels;
   }, [availableAgents, feishuBindingCatalog]);
-
-  const feishuAccountBindingMap = useMemo(() => {
-    const bindings = new Map<string, FeishuAccountBindingSummary>();
-    for (const account of feishuBindingCatalog?.accounts ?? []) {
-      bindings.set(account.accountId, account);
-    }
-    return bindings;
-  }, [feishuBindingCatalog]);
 
   const editingFeishuAccount = useMemo(
     () => findFeishuAccountSummary(feishuBindingCatalog, editingAccountId),
@@ -539,11 +528,8 @@ export default function ChannelsPage() {
   }, []);
 
   const refreshAll = useCallback(async (options?: { silent?: boolean }) => {
-    await Promise.all([
-      fetchChannels({ silent: options?.silent }),
-      loadFeishuBindingCatalog(editingAccountId),
-    ]);
-  }, [editingAccountId, fetchChannels, loadFeishuBindingCatalog]);
+    await fetchChannels({ silent: options?.silent });
+  }, [fetchChannels]);
 
   const refreshFeishuDisplayNames = useCallback(async (accountId?: string | null) => {
     try {
@@ -584,10 +570,6 @@ export default function ChannelsPage() {
           const data = result.stdout ? parseJsonValue<Record<string, unknown>>(result.stdout, {}) : {};
           const nextChannels = extractChannelEntries(data);
           setChannels(nextChannels);
-          void loadFeishuBindingCatalog();
-          if (shouldRefreshFeishuDisplayNames(nextChannels)) {
-            void refreshFeishuDisplayNames();
-          }
         }
       } catch (e) {
         if (!cancelled) {
@@ -605,13 +587,9 @@ export default function ChannelsPage() {
     return () => {
       cancelled = true;
     };
-  }, [loadFeishuBindingCatalog, refreshFeishuDisplayNames]);
+  }, []);
 
   const statuses = useMemo(() => {
-    const feishuBindingByAccount = new Map(
-      (feishuBindingCatalog?.accounts ?? []).map((account) => [account.accountId, account]),
-    );
-
     return channels.map((channel) => {
       if (!channel.enabled) {
         return {
@@ -623,8 +601,7 @@ export default function ChannelsPage() {
       }
 
       if (channel.channel === "feishu") {
-        const binding = feishuBindingByAccount.get(channel.account);
-        if (!binding?.boundAgentId) {
+        if (!channel.boundAgentId) {
           return {
             channel: channel.channel,
             account: channel.account,
@@ -648,7 +625,7 @@ export default function ChannelsPage() {
         message: "已配置",
       };
     });
-  }, [channels, feishuBindingCatalog]);
+  }, [channels]);
 
   const getStatus = useCallback((channel: string, account: string) => (
     statuses.find((entry) => entry.channel === channel && (entry.account === account || entry.account === "default"))
@@ -1161,9 +1138,9 @@ export default function ChannelsPage() {
                     size="icon"
                     className="h-7 w-7"
                     onClick={() => void refreshAll()}
-                    disabled={loading || bindingCatalogLoading}
+                    disabled={loading}
                   >
-                    {loading || bindingCatalogLoading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                    {loading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>刷新</TooltipContent>
@@ -1213,9 +1190,6 @@ export default function ChannelsPage() {
                   const info = getChannelInfo(channel.channel);
                   const status = getStatus(channel.channel, channel.account);
                   const statusMeta = status ? getChannelStatusMeta(status.state) : null;
-                  const feishuBinding = channel.channel === "feishu"
-                    ? (feishuAccountBindingMap.get(channel.account) ?? null)
-                    : null;
                   const key = `${channel.channel}:${channel.account}`;
 
                   return (
@@ -1245,7 +1219,7 @@ export default function ChannelsPage() {
                               </p>
                               {channel.channel === "feishu" && (
                                 <p className="mt-1 text-[11px] text-muted-foreground">
-                                  Agent: {feishuBinding?.boundAgentId ? (agentLabelById.get(feishuBinding.boundAgentId) || feishuBinding.boundAgentId) : "未绑定"}
+                                  Agent: {channel.boundAgentName || channel.boundAgentId || "未绑定"}
                                 </p>
                               )}
                               {status?.message && (

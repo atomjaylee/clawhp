@@ -8853,6 +8853,32 @@ fn channel_has_root_snapshot(
     })
 }
 
+fn config_agent_name_map(config: &serde_json::Value) -> BTreeMap<String, String> {
+    config
+        .pointer("/agents/list")
+        .and_then(|value| value.as_array())
+        .map(|agents| {
+            agents
+                .iter()
+                .filter_map(|item| {
+                    let id = item
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?;
+                    let name = item
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or(id);
+                    Some((id.to_string(), name.to_string()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default()
+}
+
 fn build_channels_snapshot_payload() -> serde_json::Value {
     let mut payload = serde_json::json!({
         "chat": {},
@@ -8869,6 +8895,8 @@ fn build_channels_snapshot_payload() -> serde_json::Value {
     else {
         return payload;
     };
+    let feishu_binding_map = read_feishu_account_binding_map(&config);
+    let agent_name_map = config_agent_name_map(&config);
 
     for (channel_name, channel_value) in channels {
         let Some(channel) = channel_value.as_object() else {
@@ -8891,10 +8919,21 @@ fn build_channels_snapshot_payload() -> serde_json::Value {
                 let enabled = account
                     .and_then(|value| value.get("enabled").and_then(|entry| entry.as_bool()))
                     .unwrap_or(channel_enabled);
+                let bound_agent_id = if channel_name == "feishu" {
+                    feishu_binding_map.get(account_id).cloned()
+                } else {
+                    None
+                };
+                let bound_agent_name = bound_agent_id
+                    .as_ref()
+                    .and_then(|agent_id| agent_name_map.get(agent_id))
+                    .cloned();
 
                 payload["chat"][channel_name][account_id.as_str()] = serde_json::json!({
                     "name": name,
                     "enabled": enabled,
+                    "boundAgentId": bound_agent_id,
+                    "boundAgentName": bound_agent_name,
                 });
             }
             continue;
@@ -8910,10 +8949,21 @@ fn build_channels_snapshot_payload() -> serde_json::Value {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("default");
         let name = channel_snapshot_name(channel, None, account_id);
+        let bound_agent_id = if channel_name == "feishu" {
+            feishu_binding_map.get(account_id).cloned()
+        } else {
+            None
+        };
+        let bound_agent_name = bound_agent_id
+            .as_ref()
+            .and_then(|agent_id| agent_name_map.get(agent_id))
+            .cloned();
 
         payload["chat"][channel_name][account_id] = serde_json::json!({
             "name": name,
             "enabled": channel_enabled,
+            "boundAgentId": bound_agent_id,
+            "boundAgentName": bound_agent_name,
         });
     }
 

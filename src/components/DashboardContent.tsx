@@ -142,22 +142,29 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
     }
   }, [gatewayPort]);
 
+  const refreshConfiguredChannels = useCallback(async () => {
+    try {
+      const result: CommandResult = await invoke("list_channels_snapshot");
+      setConfiguredChannelCount(countConfiguredChannelsFromSnapshot(result));
+    } catch {
+      setConfiguredChannelCount(0);
+    }
+  }, []);
+
   const refreshSnapshots = useCallback(async () => {
     setStatusLoading(true);
     const errors: string[] = [];
 
     try {
-      const [gatewayResult, runtimeResult, auditResult, channelsResult] = await Promise.allSettled([
+      const [gatewayResult, runtimeResult, auditResult] = await Promise.allSettled([
         invoke<CommandResult>("get_gateway_status_snapshot"),
         invoke<CommandResult>("get_runtime_status_snapshot"),
         invoke<CommandResult>("get_security_audit_snapshot"),
-        invoke<CommandResult>("list_channels_snapshot"),
       ]);
 
       let nextGateway: GatewaySnapshot | null = null;
       let nextRuntime: RuntimeSnapshot | null = null;
       let nextAudit: SecurityAuditSnapshot | null = null;
-      let nextConfiguredChannelCount = 0;
 
       if (gatewayResult.status === "fulfilled") {
         nextGateway = parseJsonResult<GatewaySnapshot>(gatewayResult.value);
@@ -186,10 +193,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
         errors.push("安全提醒获取失败");
       }
 
-      if (channelsResult.status === "fulfilled") {
-        nextConfiguredChannelCount = countConfiguredChannelsFromSnapshot(channelsResult.value);
-      }
-
       if (nextGateway) {
         setGatewaySnapshot(nextGateway);
       }
@@ -199,7 +202,6 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
       if (nextAudit || nextRuntime?.securityAudit) {
         setSecurityAudit(nextAudit ?? nextRuntime?.securityAudit ?? null);
       }
-      setConfiguredChannelCount(nextConfiguredChannelCount);
 
       if (nextGateway?.rpc?.ok === false) {
         setGwMessage(firstMeaningfulLine(nextGateway.rpc.error) ?? "网关已启动，但控制面板暂时连不上");
@@ -228,10 +230,14 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
     setGwStatus("checking");
     checkGateway();
     refreshSnapshots();
+    void refreshConfiguredChannels();
     void refreshConfiguredPrimaryModel();
 
     const portTimer = setInterval(checkGateway, PORT_POLL_INTERVAL);
     const snapshotTimer = setInterval(refreshSnapshots, SNAPSHOT_POLL_INTERVAL);
+    const channelTimer = setInterval(() => {
+      void refreshConfiguredChannels();
+    }, SNAPSHOT_POLL_INTERVAL);
     const primaryTimer = setInterval(() => {
       void refreshConfiguredPrimaryModel();
     }, SNAPSHOT_POLL_INTERVAL);
@@ -239,9 +245,10 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
     return () => {
       clearInterval(portTimer);
       clearInterval(snapshotTimer);
+      clearInterval(channelTimer);
       clearInterval(primaryTimer);
     };
-  }, [checkGateway, refreshSnapshots, refreshConfiguredPrimaryModel]);
+  }, [checkGateway, refreshSnapshots, refreshConfiguredChannels, refreshConfiguredPrimaryModel]);
 
   useEffect(() => {
     const unlisten = listen<GatewayLogEvent>("gateway-log", (event) => {
@@ -252,6 +259,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
         setGwStatus("running");
         setGwMessage(message);
         void refreshSnapshots();
+        void refreshConfiguredChannels();
       } else if (level === "warn") {
         setGwStatus("recovering");
         setGwMessage(message);
@@ -359,8 +367,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   const gatewayServiceLabel = runtimeSnapshot?.gatewayService?.runtimeShort
     ?? gatewaySnapshot?.service?.runtime?.status
     ?? (gwStatus === "running" ? "running" : "stopped");
-  const runtimeChannelCount = runtimeSnapshot?.channelSummary?.length ?? 0;
-  const channelCount = Math.max(runtimeChannelCount, configuredChannelCount);
+  const channelCount = configuredChannelCount;
   const defaultModel = configuredPrimaryModel
     ?? runtimeSnapshot?.sessions?.defaults?.model
     ?? runtimeSnapshot?.sessions?.recent?.[0]?.model
@@ -467,7 +474,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
             variant="outline"
             onClick={async () => {
               setGwStatus("checking");
-              await Promise.all([checkGateway(), refreshSnapshots(), refreshConfiguredPrimaryModel()]);
+              await Promise.all([checkGateway(), refreshSnapshots(), refreshConfiguredChannels(), refreshConfiguredPrimaryModel()]);
             }}
             disabled={gwBusy || statusLoading}
           >
@@ -540,7 +547,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
                   className="h-8 w-8 text-muted-foreground"
                   onClick={async () => {
                     setGwStatus("checking");
-                    await Promise.all([checkGateway(), refreshSnapshots(), refreshConfiguredPrimaryModel()]);
+                    await Promise.all([checkGateway(), refreshSnapshots(), refreshConfiguredChannels(), refreshConfiguredPrimaryModel()]);
                   }}
                   disabled={gwBusy || statusLoading}
                   title="刷新状态"
