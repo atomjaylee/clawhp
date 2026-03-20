@@ -143,10 +143,13 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
       const snapshot = parseUpdateStatus(result);
       if (snapshot) {
         setUpdateSnapshot(snapshot);
+        setUpdateStatusError("");
       } else {
-        setUpdateStatusError(result.stderr || "无法读取更新状态");
+        setUpdateSnapshot(null);
+        setUpdateStatusError(formatUpdateStatusFailure(result));
       }
     } catch (error) {
+      setUpdateSnapshot(null);
       setUpdateStatusError(`${error}`);
     } finally {
       setUpdateStatusLoading(false);
@@ -843,13 +846,51 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
   );
 }
 
+function formatUpdateStatusFailure(result: CommandResult) {
+  const message = pickOneLine(result.stderr) || pickOneLine(result.stdout);
+
+  if (!message || message === "未知错误") {
+    return "更新命令没有返回可解析的状态信息";
+  }
+
+  return message;
+}
+
 function parseUpdateStatus(result: CommandResult): UpdateStatusSnapshot | null {
-  if (!result.success || !result.stdout.trim()) {
+  const candidates = [result.stdout, result.stderr, [result.stdout, result.stderr].filter(Boolean).join("\n")];
+
+  for (const candidate of candidates) {
+    const snapshot = tryParseUpdateStatusCandidate(candidate);
+    if (snapshot) {
+      return snapshot;
+    }
+  }
+
+  return null;
+}
+
+function tryParseUpdateStatusCandidate(value?: string | null): UpdateStatusSnapshot | null {
+  if (!value?.trim()) {
     return null;
   }
 
+  const normalized = value.trim();
+  const direct = safeParseJson(normalized);
+  if (direct) {
+    return direct;
+  }
+
+  const firstBrace = normalized.search(/[\[{]/);
+  if (firstBrace > 0) {
+    return safeParseJson(normalized.slice(firstBrace));
+  }
+
+  return null;
+}
+
+function safeParseJson(value: string): UpdateStatusSnapshot | null {
   try {
-    return JSON.parse(result.stdout) as UpdateStatusSnapshot;
+    return JSON.parse(value) as UpdateStatusSnapshot;
   } catch {
     return null;
   }

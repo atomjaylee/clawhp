@@ -1,4 +1,4 @@
-use crate::config::{run_openclaw_args, run_openclaw_args_timeout};
+use crate::config::{parse_json_value_from_output, run_openclaw_args, run_openclaw_args_timeout};
 use crate::event::emit_install_event;
 use crate::stream_command_to_event;
 use crate::types::CommandResult;
@@ -21,7 +21,30 @@ pub(crate) async fn get_update_status_snapshot() -> CommandResult {
             "status".to_string(),
             "--json".to_string(),
         ];
-        run_openclaw_args_timeout(&args, Duration::from_secs(15))
+        let result = run_openclaw_args_timeout(&args, Duration::from_secs(15));
+
+        let parsed_json = parse_json_value_from_output(&result.stdout)
+            .or_else(|| parse_json_value_from_output(&result.stderr))
+            .or_else(|| {
+                let combined = [result.stdout.as_str(), result.stderr.as_str()]
+                    .iter()
+                    .filter(|part| !part.trim().is_empty())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                parse_json_value_from_output(&combined)
+            });
+
+        if let Some(json) = parsed_json {
+            return CommandResult {
+                success: true,
+                stdout: json.to_string(),
+                stderr: result.stderr,
+                code: result.code,
+            };
+        }
+
+        result
     })
     .await
     .unwrap_or_else(|e| CommandResult {
@@ -34,36 +57,106 @@ pub(crate) async fn get_update_status_snapshot() -> CommandResult {
 
 #[tauri::command]
 pub(crate) async fn get_github_release_snapshot() -> CommandResult {
-    tokio::task::spawn_blocking(move || {
-        let curl_args = vec![
-            "-fsSL".to_string(),
-            "--max-time".to_string(),
-            "12".to_string(),
-            "-H".to_string(),
-            "Accept: application/vnd.github+json".to_string(),
-            "-H".to_string(),
-            "User-Agent: clawhelp".to_string(),
-            "https://api.github.com/repos/openclaw/openclaw/releases/latest".to_string(),
-        ];
-        let curl_result = run_cmd_owned_timeout("curl", &curl_args, Duration::from_secs(15));
-        if curl_result.success || !cfg!(target_os = "windows") {
-            return curl_result;
+    let client = match reqwest::Client::builder()
+        .user_agent("clawhelp")
+        .timeout(Duration::from_secs(12))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: format!("无法创建 GitHub 请求客户端: {}", error),
+                code: None,
+            };
         }
+    };
 
-        let ps_args = vec![
-            "-NoProfile".to_string(),
-            "-Command".to_string(),
-            "Invoke-RestMethod -Headers @{ 'User-Agent' = 'clawhelp'; 'Accept' = 'application/vnd.github+json' } https://api.github.com/repos/openclaw/openclaw/releases/latest | ConvertTo-Json -Depth 8".to_string(),
-        ];
-        run_cmd_owned_timeout("powershell", &ps_args, Duration::from_secs(15))
-    })
-    .await
-    .unwrap_or_else(|e| CommandResult {
-        success: false,
-        stdout: String::new(),
-        stderr: format!("Task panic: {}", e),
-        code: None,
-    })
+    let request = client
+        .get("https://api.github.com/repos/openclaw/openclaw/releases/latest")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await;
+
+    match request {
+        Ok(response) => {
+            let status = response.status();
+            match response.text().await {
+                Ok(body) => {
+                    let success = status.is_success();
+                    let stderr = if success {
+                        String::new()
+                    } else if body.trim().is_empty() {
+                        format!("GitHub Releases 返回 HTTP {}", status.as_u16())
+                    } else {
+                        format!("GitHub Releases 返回 HTTP {}\n{}", status.as_u16(), body)
+                    };
+
+                    CommandResult {
+                        success,
+                        stdout: if success { body } else { String::new() },
+                        stderr,
+                        code: Some(i32::from(status.as_u16())),
+                    }
+                }
+                Err(error) => CommandResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: format!("GitHub Releases 响应读取失败: {}", error),
+                    code: None,
+                },
+            }
+        }
+        Err(error) => {
+            let curl_args = vec![
+                "-fsSL".to_string(),
+                "--max-time".to_string(),
+                "12".to_string(),
+                "-H".to_string(),
+                "Accept: application/vnd.github+json".to_string(),
+                "-H".to_string(),
+                "User-Agent: clawhelp".to_string(),
+                "https://api.github.com/repos/openclaw/openclaw/releases/latest".to_string(),
+            ];
+            let curl_result = run_cmd_owned_timeout("curl", &curl_args, Duration::from_secs(15));
+            if curl_result.success || !cfg!(target_os = "windows") {
+                return if curl_result.success {
+                    curl_result
+                } else {
+                    CommandResult {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "GitHub Releases 请求失败：{}\n备用 curl 也失败：{}",
+                            error, curl_result.stderr
+                        ),
+                        code: curl_result.code,
+                    }
+                };
+            }
+
+            let ps_args = vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Invoke-RestMethod -Headers @{ 'User-Agent' = 'clawhelp'; 'Accept' = 'application/vnd.github+json' } https://api.github.com/repos/openclaw/openclaw/releases/latest | ConvertTo-Json -Depth 8".to_string(),
+            ];
+            let ps_result = run_cmd_owned_timeout("powershell", &ps_args, Duration::from_secs(15));
+            if ps_result.success {
+                ps_result
+            } else {
+                CommandResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: format!(
+                        "GitHub Releases 请求失败：{}\n备用 curl 失败：{}\nPowerShell 也失败：{}",
+                        error, curl_result.stderr, ps_result.stderr
+                    ),
+                    code: ps_result.code.or(curl_result.code),
+                }
+            }
+        }
+    }
 }
 
 #[tauri::command]
