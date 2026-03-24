@@ -81,6 +81,7 @@ export interface SkillInstallHint {
 
 export interface OpenClawSkillInfo {
   name: string;
+  dirName: string;
   description: string;
   emoji?: string | null;
   eligible: boolean;

@@ -2,7 +2,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Blocks, Download, ExternalLink, FolderOpen, Loader2, PackageOpen,
-  Puzzle, RefreshCw, Search, Sparkles, Trash2, Wrench,
+  Puzzle, RefreshCw, Search, Sparkles, Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -16,12 +16,9 @@ import type {
   OpenClawSkillInfo,
   SkillInfo,
   SkillMarketplaceEntry,
-  SkillsRequirementSnapshot,
-  SkillRequirementState,
   SkillsDashboardSnapshot,
 } from "@/types";
 
-type BundledFilter = "all" | "ready" | "needs-setup";
 type SkillsModuleTab = "installed" | "market" | "workspace" | "bundled";
 
 const TENCENT_MARKETPLACE = {
@@ -35,24 +32,16 @@ export default function SkillsPage() {
   const [snapshot, setSnapshot] = useState<SkillsDashboardSnapshot | null>(null);
   const [pageLoading, setPageLoading] = useState(true);
   const [pageError, setPageError] = useState("");
-  const [bundledDialogOpen, setBundledDialogOpen] = useState(false);
   const [bundledQuery, setBundledQuery] = useState("");
   const [marketQuery, setMarketQuery] = useState("");
   const [marketItems, setMarketItems] = useState<SkillMarketplaceEntry[]>([]);
   const [marketLoading, setMarketLoading] = useState(false);
   const [marketError, setMarketError] = useState("");
   const [marketMessage, setMarketMessage] = useState("");
-  const [requirementsLoading, setRequirementsLoading] = useState(false);
-  const [requirementsLoaded, setRequirementsLoaded] = useState(false);
-  const [requirementWarnings, setRequirementWarnings] = useState<string[]>([]);
-  const [requirementMessage, setRequirementMessage] = useState("");
-  const [requirementError, setRequirementError] = useState("");
-  const [installingRequirementKey, setInstallingRequirementKey] = useState<string | null>(null);
   const [installingSlug, setInstallingSlug] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<SkillInfo | null>(null);
   const [deleteError, setDeleteError] = useState("");
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [bundledFilter, setBundledFilter] = useState<BundledFilter>("all");
   const [moduleTab, setModuleTab] = useState<SkillsModuleTab>("installed");
 
   async function fetchSnapshot(options?: { silent?: boolean }) {
@@ -60,62 +49,17 @@ export default function SkillsPage() {
       setPageLoading(true);
     }
 
-    setRequirementError("");
-
     try {
       const nextSnapshot = await invoke<SkillsDashboardSnapshot>("get_skills_dashboard_snapshot");
       setSnapshot(nextSnapshot);
       setPageError("");
-      setRequirementWarnings([]);
-      setRequirementsLoaded(nextSnapshot.openclawSkills.length === 0);
       return nextSnapshot;
     } catch (error) {
       setPageError(`读取 Skills 状态失败: ${error}`);
       setSnapshot(null);
-      setRequirementWarnings([]);
-      setRequirementsLoaded(false);
       return null;
     } finally {
       setPageLoading(false);
-    }
-  }
-
-  async function fetchRequirementDetails() {
-    setRequirementsLoading(true);
-    setRequirementError("");
-
-    try {
-      const payload = await invoke<SkillsRequirementSnapshot>("get_skills_requirement_snapshot");
-      setSnapshot((current) => {
-        if (!current) {
-          return current;
-        }
-
-        const mergedSkills = current.openclawSkills.map((skill) => ({
-          ...skill,
-          installHints: payload.installHintsBySkill[skill.name] ?? [],
-        }));
-
-        return {
-          ...current,
-          openclawSkills: mergedSkills,
-          summary: {
-            ...current.summary,
-            eligibleCount: payload.eligibleCount || mergedSkills.filter((skill) => skill.eligible).length,
-            missingRequirementCount:
-              payload.missingRequirementCount
-              || mergedSkills.filter((skill) => !isRequirementStateEmpty(skill.missing)).length,
-          },
-        };
-      });
-      setRequirementWarnings(payload.warnings ?? []);
-      setRequirementError("");
-      setRequirementsLoaded(true);
-    } catch (error) {
-      setRequirementWarnings([]);
-      setRequirementError(`读取依赖建议失败: ${error}`);
-    } finally {
-      setRequirementsLoading(false);
     }
   }
 
@@ -219,39 +163,11 @@ export default function SkillsPage() {
     }
   }
 
-  async function handleInstallRequirement(skill: OpenClawSkillInfo, hintId: string, hintLabel: string) {
-    const requirementKey = `${skill.source}:${skill.name}:${hintId}`;
-    setInstallingRequirementKey(requirementKey);
-    setRequirementError("");
-    setRequirementMessage("");
-
-    try {
-      const result: CommandResult = await invoke("install_skill_requirement", {
-        skillName: skill.name,
-        source: skill.source,
-        hintId,
-      });
-      if (!result.success) {
-        setRequirementError(result.stderr || `安装 ${hintLabel} 失败`);
-        return;
-      }
-
-      setRequirementMessage(result.stdout.trim() || `已执行 ${hintLabel}`);
-      await loadSkillsView({ silent: true });
-    } catch (error) {
-      setRequirementError(`安装 ${hintLabel} 失败: ${error}`);
-    } finally {
-      setInstallingRequirementKey(null);
-    }
-  }
-
   const managedSkills = snapshot?.managedSkills ?? [];
   const openclawSkills = snapshot?.openclawSkills ?? [];
   const bundledSkills = openclawSkills.filter((skill) => skill.source === "openclaw-bundled");
   const workspaceSkills = openclawSkills.filter((skill) => skill.source === "openclaw-workspace");
-  const readyBundledCount = bundledSkills.filter((skill) => skill.eligible).length;
-  const missingBundledCount = bundledSkills.filter((skill) => !skill.eligible).length;
-  const warningMessages = [...(snapshot?.warnings ?? []), ...requirementWarnings];
+  const warningMessages = snapshot?.warnings ?? [];
   const managedSkillNames = new Set(managedSkills.map((skill) => skill.originSlug || skill.name));
   const openclawSkillNames = new Set(openclawSkills.map((skill) => skill.name));
   const moduleTabs: ModuleTabItem<SkillsModuleTab>[] = [
@@ -262,16 +178,6 @@ export default function SkillsPage() {
   ];
   const filteredBundledSkills = bundledSkills.filter((skill) => {
     const keyword = bundledQuery.trim().toLowerCase();
-    if (bundledFilter === "ready") {
-      if (!skill.eligible) {
-        return false;
-      }
-    }
-    if (bundledFilter === "needs-setup") {
-      if (skill.eligible) {
-        return false;
-      }
-    }
     if (!keyword) {
       return true;
     }
@@ -287,29 +193,6 @@ export default function SkillsPage() {
   const canDirectInstall = isLikelySkillSlug(marketQuery)
     && !managedSkillNames.has(marketQuery.trim())
     && !openclawSkillNames.has(marketQuery.trim());
-  const hasSkillsNeedingExtraHints = openclawSkills.some(
-    (skill) => !skill.eligible && skill.installHints.length === 0,
-  );
-
-  useEffect(() => {
-    if (!snapshot || requirementsLoaded || requirementsLoading || !hasSkillsNeedingExtraHints) {
-      return;
-    }
-
-    const viewingSkillsCatalog = moduleTab === "bundled" || moduleTab === "workspace" || bundledDialogOpen;
-    if (!viewingSkillsCatalog) {
-      return;
-    }
-
-    void fetchRequirementDetails();
-  }, [
-    bundledDialogOpen,
-    hasSkillsNeedingExtraHints,
-    moduleTab,
-    requirementsLoaded,
-    requirementsLoading,
-    snapshot,
-  ]);
 
   return (
     <TooltipProvider delayDuration={250}>
@@ -326,8 +209,6 @@ export default function SkillsPage() {
                 <p className="text-[12px] text-muted-foreground">
                   {pageLoading && !snapshot
                     ? "正在读取本地与 OpenClaw Skills 状态"
-                    : requirementsLoading && snapshot
-                      ? `${managedSkills.length} 个额外安装，${openclawSkills.length} 个 OpenClaw 可用 Skills，依赖建议补充中`
                     : `${managedSkills.length} 个额外安装，${openclawSkills.length} 个 OpenClaw 可用 Skills`}
                 </p>
               </div>
@@ -341,9 +222,9 @@ export default function SkillsPage() {
                     size="icon"
                     className="h-8 w-8"
                     onClick={() => void refreshAll()}
-                    disabled={pageLoading || marketLoading || requirementsLoading}
+                    disabled={pageLoading || marketLoading}
                   >
-                    {(pageLoading || marketLoading || requirementsLoading) ? <Loader2 className="animate-spin" /> : <RefreshCw size={14} />}
+                    {(pageLoading || marketLoading) ? <Loader2 className="animate-spin" /> : <RefreshCw size={14} />}
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>刷新 Skills 列表与市场</TooltipContent>
@@ -384,13 +265,6 @@ export default function SkillsPage() {
                 hint="来自工作区透出的能力"
                 tone="cyan"
               />
-              <SummaryCard
-                icon={Wrench}
-                title="待补依赖"
-                value={snapshot?.summary.missingRequirementCount ?? 0}
-                hint={requirementsLoading && !requirementsLoaded ? "正在后台补充安装建议" : "需要额外 CLI、环境变量或频道配置"}
-                tone="rose"
-              />
             </div>
 
             {pageError && (
@@ -405,59 +279,73 @@ export default function SkillsPage() {
               </NoticeCard>
             ) : null}
 
-            {requirementError && (
-              <div className="rounded-xl border border-red-500/20 bg-red-500/8 px-3 py-2.5 text-[12px] text-red-200">
-                {requirementError}
-              </div>
-            )}
-
-            {requirementMessage && (
-              <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-2.5 text-[12px] text-cyan-100">
-                {requirementMessage}
-              </div>
-            )}
-
             <ModuleTabs items={moduleTabs} value={moduleTab} onValueChange={setModuleTab} />
 
             {moduleTab === "bundled" && (
-              <Card className="overflow-hidden border-white/[0.08] bg-[radial-gradient(circle_at_top_left,rgba(8,145,178,0.14),transparent_38%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))]">
-                <CardContent className="space-y-4 p-4">
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="space-y-1">
+              <>
+                <Card className="border-white/[0.08] bg-[radial-gradient(circle_at_top_left,rgba(8,145,178,0.12),transparent_38%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))]">
+                  <CardContent className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between">
+                    <div className="min-w-0 space-y-1">
                       <div className="flex items-center gap-2">
                         <Sparkles size={15} className="text-cyan-300" />
-                        <h3 className="text-[14px] font-semibold">OpenClaw 自带 Skills</h3>
+                        <h3 className="text-[14px] font-semibold">OpenClaw 内置能力</h3>
                       </div>
                       <p className="text-[12px] text-muted-foreground">
-                        自带 Skills 数量很多，这里先保留摘要；需要时再进弹窗集中查看和补依赖。
+                        直接在当前页面筛选和搜索内置能力。
                       </p>
                     </div>
-                    <Button size="sm" onClick={() => setBundledDialogOpen(true)}>
-                      <Sparkles size={14} />
-                      查看全部
-                    </Button>
-                  </div>
 
-                  <div className="grid gap-3 md:grid-cols-3">
-                    <CompactMetric label="自带总数" value={bundledSkills.length} tone="amber" />
-                    <CompactMetric label="可直接用" value={readyBundledCount} tone="teal" />
-                    <CompactMetric label="待补依赖" value={missingBundledCount} tone="rose" />
-                  </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <CompactMetric label="总数" value={bundledSkills.length} tone="amber" compact />
+                    </div>
+                  </CardContent>
+                </Card>
 
-                  <div className="flex flex-wrap gap-2">
-                    {bundledSkills.slice(0, 8).map((skill) => (
-                      <Badge key={skill.name} className="border-0 bg-white/[0.06] px-2 py-0.5 text-[10px] text-muted-foreground">
-                        {skill.name}
-                      </Badge>
-                    ))}
-                    {bundledSkills.length > 8 ? (
-                      <Badge className="border-0 bg-cyan-500/12 px-2 py-0.5 text-[10px] text-cyan-100">
-                        +{bundledSkills.length - 8} 个
-                      </Badge>
-                    ) : null}
-                  </div>
-                </CardContent>
-              </Card>
+                <Card className="border-white/[0.08] bg-black/15">
+                  <CardContent className="space-y-4 p-4">
+                    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
+                      <div className="space-y-2">
+                        <label htmlFor="bundled-skill-search" className="text-[12px] font-medium text-foreground">
+                          搜索内置能力
+                        </label>
+                        <div className="relative">
+                          <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                          <Input
+                            id="bundled-skill-search"
+                            value={bundledQuery}
+                            onChange={(event) => setBundledQuery(event.target.value)}
+                            placeholder="例如 1password、github、voice"
+                            className="h-10 border-white/[0.08] bg-black/20 pl-9"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex h-fit flex-wrap items-center gap-2 lg:self-end lg:justify-end">
+                        <span className="text-[12px] text-muted-foreground">
+                          共 {filteredBundledSkills.length} 个
+                        </span>
+                      </div>
+                    </div>
+
+                    {filteredBundledSkills.length === 0 ? (
+                      <Card className="border-dashed border-white/[0.08] bg-white/[0.02]">
+                        <CardContent className="py-10 text-center text-[12px] text-muted-foreground">
+                          当前筛选条件下没有匹配的 OpenClaw 自带 Skills。
+                        </CardContent>
+                      </Card>
+                    ) : (
+                      <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+                        {filteredBundledSkills.map((skill) => (
+                          <AvailableSkillCard
+                            key={`${skill.source}:${skill.name}`}
+                            skill={skill}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </>
             )}
 
             {moduleTab === "workspace" && (
@@ -472,9 +360,6 @@ export default function SkillsPage() {
                       <AvailableSkillCard
                         key={`${skill.source}:${skill.name}`}
                         skill={skill}
-                        requirementDetailsLoading={requirementsLoading && !requirementsLoaded}
-                        installingRequirementKey={installingRequirementKey}
-                        onInstallRequirement={(hintId, hintLabel) => void handleInstallRequirement(skill, hintId, hintLabel)}
                       />
                     ))}
                   </div>
@@ -659,109 +544,6 @@ export default function SkillsPage() {
           </>
         )}
 
-        {bundledDialogOpen && (
-          <div
-            className="fixed inset-0 z-[115] flex items-center justify-center bg-black/75 px-4 py-6 backdrop-blur-sm"
-            onClick={() => {
-              if (!installingRequirementKey) {
-                setBundledDialogOpen(false);
-              }
-            }}
-          >
-            <Card
-              className="flex max-h-[90vh] w-full max-w-6xl flex-col border-white/[0.08] bg-[#081017] shadow-2xl shadow-black/40"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <CardContent className="flex min-h-0 flex-1 flex-col gap-4 p-5">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                  <div className="space-y-1">
-                    <h3 className="text-[14px] font-semibold">OpenClaw 自带 Skills</h3>
-                    <p className="text-[12px] text-muted-foreground">
-                      在这里集中查看默认 Skills，并对“待补依赖”的项直接补安装。
-                    </p>
-                  </div>
-                  <Button size="sm" variant="outline" onClick={() => setBundledDialogOpen(false)} disabled={Boolean(installingRequirementKey)}>
-                    关闭
-                  </Button>
-                </div>
-
-                {requirementError && (
-                  <div className="rounded-xl border border-red-500/20 bg-red-500/8 px-3 py-2.5 text-[12px] text-red-200">
-                    {requirementError}
-                  </div>
-                )}
-
-                {requirementMessage && (
-                  <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-3 py-2.5 text-[12px] text-cyan-100">
-                    {requirementMessage}
-                  </div>
-                )}
-
-                <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
-                  <div className="space-y-2">
-                    <label htmlFor="bundled-skill-search" className="text-[12px] font-medium text-foreground">
-                      搜索自带 Skills
-                    </label>
-                    <div className="relative">
-                      <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                      <Input
-                        id="bundled-skill-search"
-                        value={bundledQuery}
-                        onChange={(event) => setBundledQuery(event.target.value)}
-                        placeholder="例如 1password、github、voice"
-                        className="h-10 border-white/[0.08] bg-black/20 pl-9"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex h-fit flex-wrap items-center gap-2 lg:self-end lg:justify-end">
-                    {[
-                      { id: "all", label: "全部" },
-                      { id: "ready", label: "可直接用" },
-                      { id: "needs-setup", label: "待补依赖" },
-                    ].map((filter) => (
-                      <button
-                        key={filter.id}
-                        type="button"
-                        className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[12px] font-medium transition-colors ${
-                          bundledFilter === filter.id
-                            ? "border-cyan-400/40 bg-cyan-500/12 text-cyan-100"
-                            : "border-white/[0.08] bg-white/[0.03] text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
-                        }`}
-                        onClick={() => setBundledFilter(filter.id as BundledFilter)}
-                      >
-                        {filter.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-                  {filteredBundledSkills.length === 0 ? (
-                    <Card className="border-dashed border-white/[0.08] bg-white/[0.02]">
-                      <CardContent className="py-10 text-center text-[12px] text-muted-foreground">
-                        当前筛选条件下没有匹配的 OpenClaw 自带 Skills。
-                      </CardContent>
-                    </Card>
-                  ) : (
-                    <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
-                      {filteredBundledSkills.map((skill) => (
-                        <AvailableSkillCard
-                          key={`${skill.source}:${skill.name}`}
-                          skill={skill}
-                          requirementDetailsLoading={requirementsLoading && !requirementsLoaded}
-                          installingRequirementKey={installingRequirementKey}
-                          onInstallRequirement={(hintId, hintLabel) => void handleInstallRequirement(skill, hintId, hintLabel)}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        )}
-
         {pendingDelete && (
           <div
             className="fixed inset-0 z-[120] flex items-center justify-center bg-black/75 px-4 backdrop-blur-sm"
@@ -865,10 +647,12 @@ function CompactMetric({
   label,
   value,
   tone,
+  compact = false,
 }: {
   label: string;
   value: number;
   tone: "teal" | "amber" | "rose";
+  compact?: boolean;
 }) {
   const toneClass = {
     teal: "border-teal-500/15 bg-teal-500/8 text-teal-100",
@@ -877,9 +661,9 @@ function CompactMetric({
   }[tone];
 
   return (
-    <div className={`rounded-2xl border px-4 py-3 ${toneClass}`}>
+    <div className={`rounded-2xl border px-4 ${compact ? "py-2" : "py-3"} ${toneClass}`}>
       <p className="text-[11px] text-current/70">{label}</p>
-      <p className="mt-1 text-xl font-semibold tracking-tight">{value}</p>
+      <p className={`${compact ? "mt-0.5 text-base" : "mt-1 text-xl"} font-semibold tracking-tight`}>{value}</p>
     </div>
   );
 }
@@ -987,19 +771,9 @@ function InstalledSkillCard({
 
 function AvailableSkillCard({
   skill,
-  requirementDetailsLoading,
-  installingRequirementKey,
-  onInstallRequirement,
 }: {
   skill: OpenClawSkillInfo;
-  requirementDetailsLoading: boolean;
-  installingRequirementKey: string | null;
-  onInstallRequirement: (hintId: string, hintLabel: string) => void;
 }) {
-  const requirementTags = collectRequirementTags(skill.missing);
-  const actionableInstallHints = skill.installHints.filter((hint) => canInstallHintDirectly(hint.kind));
-  const passiveInstallHints = skill.installHints.filter((hint) => !canInstallHintDirectly(hint.kind));
-
   return (
     <Card className="border-white/[0.08] bg-white/[0.02]">
       <CardContent className="space-y-3 p-4">
@@ -1012,9 +786,6 @@ function AvailableSkillCard({
             <div className="flex flex-wrap gap-2">
               <Badge className="border-0 bg-white/[0.06] px-1.5 py-0 text-[10px] text-muted-foreground">
                 {resolveOpenClawSourceLabel(skill.source)}
-              </Badge>
-              <Badge className={`border-0 px-1.5 py-0 text-[10px] ${skill.eligible ? "bg-teal-500/15 text-teal-200" : "bg-amber-500/15 text-amber-200"}`}>
-                {skill.eligible ? "可直接用" : "待补依赖"}
               </Badge>
               {skill.managedInstalled ? (
                 <Badge className="border-0 bg-cyan-500/15 px-1.5 py-0 text-[10px] text-cyan-100">
@@ -1037,50 +808,6 @@ function AvailableSkillCard({
           {skill.description || "这个 Skill 暂无描述。"}
         </p>
 
-        {requirementTags.length > 0 ? (
-          <div className="flex flex-wrap gap-2">
-            {requirementTags.slice(0, 4).map((tag) => (
-              <Badge key={tag} className="border-0 bg-amber-500/10 px-1.5 py-0 text-[10px] text-amber-100/90">
-                {tag}
-              </Badge>
-            ))}
-          </div>
-        ) : null}
-
-        {!skill.eligible && skill.installHints.length === 0 && requirementDetailsLoading ? (
-          <p className="text-[11px] text-muted-foreground">
-            正在补充安装建议...
-          </p>
-        ) : null}
-
-        {actionableInstallHints.length > 0 ? (
-          <div className="flex flex-wrap gap-2">
-            {actionableInstallHints.map((hint) => {
-              const requirementKey = `${skill.source}:${skill.name}:${hint.id}`;
-              const busy = installingRequirementKey === requirementKey;
-
-              return (
-                <Button
-                  key={hint.id}
-                  size="sm"
-                  variant="outline"
-                  className="h-auto whitespace-normal border-white/[0.08] bg-white/[0.03] py-2 text-left text-[11px] leading-relaxed"
-                  disabled={Boolean(installingRequirementKey)}
-                  onClick={() => onInstallRequirement(hint.id, hint.label)}
-                >
-                  {busy ? <Loader2 className="animate-spin" /> : <Wrench size={14} />}
-                  {hint.label}
-                </Button>
-              );
-            })}
-          </div>
-        ) : null}
-
-        {passiveInstallHints.length > 0 ? (
-          <p className="text-[11px] text-muted-foreground">
-            仍需手动处理：{passiveInstallHints.map((hint) => hint.label).join("、")}
-          </p>
-        ) : null}
       </CardContent>
     </Card>
   );
@@ -1107,38 +834,6 @@ function resolveOpenClawSourceLabel(source: string) {
     return "工作区";
   }
   return source;
-}
-
-function collectRequirementTags(missing: SkillRequirementState) {
-  const tags: string[] = [];
-  if (missing.bins.length > 0) {
-    tags.push(`缺 CLI: ${missing.bins.slice(0, 2).join(", ")}`);
-  }
-  if (missing.anyBins.length > 0) {
-    tags.push(`缺任一命令组: ${missing.anyBins.slice(0, 2).join(", ")}`);
-  }
-  if (missing.env.length > 0) {
-    tags.push(`缺环境变量: ${missing.env.slice(0, 2).join(", ")}`);
-  }
-  if (missing.config.length > 0) {
-    tags.push(`缺配置: ${missing.config.slice(0, 2).join(", ")}`);
-  }
-  if (missing.os.length > 0) {
-    tags.push(`平台限制: ${missing.os.slice(0, 2).join(", ")}`);
-  }
-  return tags;
-}
-
-function canInstallHintDirectly(kind: string) {
-  return ["brew", "go", "node", "uv", "download"].includes(kind.trim().toLowerCase());
-}
-
-function isRequirementStateEmpty(missing: SkillRequirementState) {
-  return missing.bins.length === 0
-    && missing.anyBins.length === 0
-    && missing.env.length === 0
-    && missing.config.length === 0
-    && missing.os.length === 0;
 }
 
 function formatRelativeTime(value?: number | null) {

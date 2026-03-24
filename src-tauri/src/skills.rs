@@ -67,6 +67,7 @@ pub struct SkillInstallHint {
 #[serde(rename_all = "camelCase")]
 pub struct OpenClawSkillInfo {
     pub name: String,
+    pub dir_name: String,
     pub description: String,
     pub emoji: Option<String>,
     pub eligible: bool,
@@ -587,6 +588,7 @@ fn collect_openclaw_skills_from_dir(
 
         skills.push(OpenClawSkillInfo {
             name: summary.name,
+            dir_name: dir_name.clone(),
             description: summary.description,
             emoji: summary.metadata.emoji.clone(),
             eligible: missing.is_empty(),

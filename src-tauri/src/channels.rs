@@ -9,14 +9,17 @@ use crate::event::emit_install_event;
 use crate::stream_command_to_event;
 use crate::state::normalize_agent_id_key;
 use crate::terminal::open_in_external_terminal;
-use crate::types::CommandResult;
+use crate::types::{CommandResult, InstallEvent};
 use crate::util::path::{get_openclaw_home, get_openclaw_program};
+use crate::util::text::clean_line;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::Duration;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 // ---------- Terminal commands ----------
 
@@ -1899,6 +1902,765 @@ pub(crate) fn unbind_feishu_channel_account(account_id: String) -> CommandResult
     }
 }
 
+// ---------- WeChat constants and types ----------
+
+const WECHAT_PLUGIN_EVENT: &str = "wechat-plugin-log";
+const WECHAT_OFFICIAL_PLUGIN_ID: &str = "openclaw-weixin";
+const WECHAT_OFFICIAL_PLUGIN_PACKAGE: &str = "@tencent-weixin/openclaw-weixin-cli";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WechatPluginStatusPayload {
+    plugin_installed: bool,
+    plugin_enabled: bool,
+    channel_configured: bool,
+    display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WechatAccountBindingSummaryPayload {
+    account_id: String,
+    display_name: String,
+    enabled: bool,
+    bound_agent_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WechatAccountBindingCatalogPayload {
+    default_account_id: String,
+    accounts: Vec<WechatAccountBindingSummaryPayload>,
+}
+
+// ---------- WeChat helpers ----------
+
+fn wechat_official_plugin_dir() -> PathBuf {
+    PathBuf::from(get_openclaw_home())
+        .join("extensions")
+        .join(WECHAT_OFFICIAL_PLUGIN_ID)
+}
+
+fn is_wechat_route_binding(binding: &serde_json::Value) -> bool {
+    let binding_type = binding
+        .get("type")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_lowercase());
+    if matches!(binding_type.as_deref(), Some("acp")) {
+        return false;
+    }
+
+    binding
+        .get("match")
+        .and_then(|value| value.get("channel"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().eq_ignore_ascii_case("wechat"))
+        .unwrap_or(false)
+}
+
+fn read_wechat_default_account_id(config: &serde_json::Value) -> String {
+    config
+        .pointer("/channels/wechat/defaultAccount")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            config
+                .pointer("/channels/wechat/accounts")
+                .and_then(|value| value.as_object())
+                .and_then(|value| value.keys().next().cloned())
+        })
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn read_wechat_account_binding_map(config: &serde_json::Value) -> BTreeMap<String, String> {
+    let default_account_id = read_wechat_default_account_id(config);
+    let Some(bindings) = config.get("bindings").and_then(|value| value.as_array()) else {
+        return BTreeMap::new();
+    };
+
+    let mut mapping = BTreeMap::new();
+    for binding in bindings {
+        if !is_wechat_route_binding(binding) {
+            continue;
+        }
+
+        let Some(agent_id) = binding
+            .get("agentId")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+
+        let Some(binding_match) = binding.get("match").and_then(|value| value.as_object()) else {
+            continue;
+        };
+        if binding_match.get("peer").is_some() {
+            continue;
+        }
+
+        let account_id = binding_match
+            .get("accountId")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "*")
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| default_account_id.clone());
+
+        mapping
+            .entry(account_id)
+            .or_insert_with(|| agent_id.to_string());
+    }
+
+    mapping
+}
+
+fn ensure_wechat_plugin_entries(config: &mut serde_json::Value) {
+    if config.get("plugins").is_none() || !config["plugins"].is_object() {
+        config["plugins"] = serde_json::json!({});
+    }
+    if config.pointer("/plugins/entries").is_none() || !config["plugins"]["entries"].is_object() {
+        config["plugins"]["entries"] = serde_json::json!({});
+    }
+    if config.pointer("/plugins/allow").is_none() {
+        config["plugins"]["allow"] = serde_json::json!([]);
+    }
+
+    ensure_string_array_contains(&mut config["plugins"]["allow"], WECHAT_OFFICIAL_PLUGIN_ID);
+    config["plugins"]["entries"][WECHAT_OFFICIAL_PLUGIN_ID]["enabled"] = serde_json::json!(true);
+}
+
+fn wechat_account_display_name(
+    channel: &serde_json::Map<String, serde_json::Value>,
+    account: Option<&serde_json::Map<String, serde_json::Value>>,
+    fallback: &str,
+) -> String {
+    account
+        .and_then(|value| value.get("name").and_then(|entry| entry.as_str()))
+        .or_else(|| channel.get("name").and_then(|entry| entry.as_str()))
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn collect_wechat_account_binding_catalog(
+    config: &serde_json::Value,
+) -> WechatAccountBindingCatalogPayload {
+    let default_account_id = read_wechat_default_account_id(config);
+    let binding_map = read_wechat_account_binding_map(config);
+    let wechat = config
+        .pointer("/channels/wechat")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let accounts = wechat
+        .get("accounts")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let summaries = accounts
+        .iter()
+        .map(|(account_id, account_value)| {
+            let account = account_value.as_object();
+            WechatAccountBindingSummaryPayload {
+                account_id: account_id.clone(),
+                display_name: wechat_account_display_name(&wechat, account, account_id),
+                enabled: account
+                    .and_then(|value| value.get("enabled").and_then(|entry| entry.as_bool()))
+                    .unwrap_or(true),
+                bound_agent_id: binding_map.get(account_id).cloned(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    WechatAccountBindingCatalogPayload {
+        default_account_id,
+        accounts: summaries,
+    }
+}
+
+fn upsert_wechat_account_binding(
+    config: &mut serde_json::Value,
+    account_id: &str,
+    agent_id: &str,
+) -> Result<(), String> {
+    let clean_account_id = account_id.trim();
+    let clean_agent_id = agent_id.trim();
+    if clean_account_id.is_empty() {
+        return Err("微信频道账号 ID 不能为空".to_string());
+    }
+    if clean_agent_id.is_empty() {
+        return Err("绑定的 Agent ID 不能为空".to_string());
+    }
+    ensure_feishu_agent_exists(clean_agent_id)?;
+
+    let binding_map = read_wechat_account_binding_map(config);
+    if let Some(existing_agent_id) = binding_map.get(clean_account_id) {
+        if normalize_agent_id_key(existing_agent_id) != normalize_agent_id_key(clean_agent_id) {
+            return Err(format!(
+                "微信频道 {} 已绑定 Agent {}，请先解绑后再改绑",
+                clean_account_id, existing_agent_id
+            ));
+        }
+    }
+    if let Some((existing_account_id, _)) =
+        binding_map
+            .iter()
+            .find(|(existing_account_id, existing_agent_id)| {
+                normalize_agent_id_key(existing_agent_id) == normalize_agent_id_key(clean_agent_id)
+                    && existing_account_id.as_str() != clean_account_id
+            })
+    {
+        return Err(format!(
+            "Agent {} 已绑定微信频道 {}，请先解绑后再重新绑定",
+            clean_agent_id, existing_account_id
+        ));
+    }
+
+    if config.get("bindings").is_none() || !config["bindings"].is_array() {
+        config["bindings"] = serde_json::json!([]);
+    }
+
+    let default_account_id = read_wechat_default_account_id(config);
+    if let Some(bindings) = config
+        .get_mut("bindings")
+        .and_then(|value| value.as_array_mut())
+    {
+        bindings.retain(|binding| {
+            if !is_wechat_route_binding(binding) {
+                return true;
+            }
+
+            let binding_agent_id = binding
+                .get("agentId")
+                .and_then(|value| value.as_str())
+                .map(normalize_agent_id_key);
+            if binding_agent_id.as_deref() == Some(&normalize_agent_id_key(clean_agent_id)) {
+                return false;
+            }
+
+            let binding_match = binding.get("match").and_then(|value| value.as_object());
+            let has_peer = binding_match.and_then(|value| value.get("peer")).is_some();
+            let bound_account_id = binding_match
+                .and_then(|value| value.get("accountId"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && *value != "*")
+                .map(|value| value.to_string())
+                .or_else(|| {
+                    if has_peer {
+                        None
+                    } else {
+                        Some(default_account_id.clone())
+                    }
+                });
+
+            bound_account_id.as_deref() != Some(clean_account_id)
+        });
+
+        bindings.push(serde_json::json!({
+            "agentId": clean_agent_id,
+            "match": {
+                "channel": "wechat",
+                "accountId": clean_account_id,
+            },
+        }));
+    }
+
+    Ok(())
+}
+
+fn bind_wechat_account_to_agent(account_id: &str, agent_id: &str) -> Result<(), String> {
+    let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    ensure_wechat_plugin_entries(&mut config);
+    upsert_wechat_account_binding(&mut config, account_id, agent_id)?;
+    write_openclaw_config(&config)
+}
+
+fn unbind_wechat_channel_account_internal(account_id: &str) -> Result<(), String> {
+    let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    let default_account_id = read_wechat_default_account_id(&config);
+
+    if let Some(bindings) = config
+        .get_mut("bindings")
+        .and_then(|value| value.as_array_mut())
+    {
+        bindings.retain(|binding| {
+            if !is_wechat_route_binding(binding) {
+                return true;
+            }
+
+            let binding_match = binding.get("match").and_then(|value| value.as_object());
+            let has_peer = binding_match.and_then(|value| value.get("peer")).is_some();
+            let bound_account_id = binding_match
+                .and_then(|value| value.get("accountId"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && *value != "*")
+                .map(|value| value.to_string())
+                .or_else(|| {
+                    if has_peer {
+                        None
+                    } else {
+                        Some(default_account_id.clone())
+                    }
+                });
+
+            bound_account_id.as_deref() != Some(account_id.trim())
+        });
+    }
+
+    if config
+        .pointer("/channels/wechat/accounts")
+        .and_then(|value| value.as_object())
+        .is_some()
+    {
+        config["channels"]["wechat"]["accounts"][account_id.trim()]["enabled"] =
+            serde_json::json!(false);
+    }
+
+    write_openclaw_config(&config)
+}
+
+// ---------- WeChat Tauri commands ----------
+
+const WECHAT_SCAN_EVENT: &str = "wechat-scan-log";
+
+#[tauri::command]
+pub(crate) async fn start_wechat_scan_session(app: AppHandle) -> CommandResult {
+    tokio::task::spawn_blocking(move || {
+        emit_install_event(&app, WECHAT_SCAN_EVENT, "info", "正在启动微信扫码连接...");
+
+        let mut cmd = Command::new("npx");
+        cmd.args([
+            "-y",
+            &format!("{}@latest", WECHAT_OFFICIAL_PLUGIN_PACKAGE),
+            "install",
+        ])
+        .env("PATH", crate::util::path::get_full_path())
+        .env("NO_COLOR", "1")
+        .env("FORCE_COLOR", "0")
+        .env("TERM", "dumb")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!("无法启动 npx: {}", e);
+                emit_install_event(&app, WECHAT_SCAN_EVENT, "error", &msg);
+                emit_install_event(&app, WECHAT_SCAN_EVENT, "done", "error");
+                return CommandResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: msg,
+                    code: None,
+                };
+            }
+        };
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let app_out = app.clone();
+        let stdout_handle = std::thread::spawn(move || {
+            let mut lines = Vec::new();
+            let mut found_url: Option<String> = None;
+            if let Some(out) = stdout {
+                for line in BufReader::new(out).lines().map_while(Result::ok) {
+                    let cleaned = clean_line(&line);
+                    if !cleaned.is_empty() {
+                        let _ = app_out.emit(
+                            WECHAT_SCAN_EVENT,
+                            InstallEvent {
+                                level: "info".into(),
+                                message: cleaned.clone(),
+                            },
+                        );
+                        if found_url.is_none() {
+                            if let Some(url) = extract_url(&cleaned) {
+                                found_url = Some(url.clone());
+                                let _ = app_out.emit(
+                                    WECHAT_SCAN_EVENT,
+                                    InstallEvent {
+                                        level: "qr_url".into(),
+                                        message: url,
+                                    },
+                                );
+                            }
+                        }
+                        lines.push(cleaned);
+                    }
+                }
+            }
+            (lines, found_url)
+        });
+
+        let app_err = app.clone();
+        let stderr_handle = std::thread::spawn(move || {
+            let mut lines = Vec::new();
+            let mut found_url: Option<String> = None;
+            if let Some(err) = stderr {
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    let cleaned = clean_line(&line);
+                    if !cleaned.is_empty() {
+                        let _ = app_err.emit(
+                            WECHAT_SCAN_EVENT,
+                            InstallEvent {
+                                level: "info".into(),
+                                message: cleaned.clone(),
+                            },
+                        );
+                        if found_url.is_none() {
+                            if let Some(url) = extract_url(&cleaned) {
+                                found_url = Some(url.clone());
+                                let _ = app_err.emit(
+                                    WECHAT_SCAN_EVENT,
+                                    InstallEvent {
+                                        level: "qr_url".into(),
+                                        message: url,
+                                    },
+                                );
+                            }
+                        }
+                        lines.push(cleaned);
+                    }
+                }
+            }
+            (lines, found_url)
+        });
+
+        let (stdout_lines, stdout_url) = stdout_handle.join().unwrap_or_default();
+        let (stderr_lines, stderr_url) = stderr_handle.join().unwrap_or_default();
+        let found_qr_url = stdout_url.or(stderr_url);
+
+        let status = child.wait();
+        let code = status.as_ref().ok().and_then(|s| s.code());
+        let success = status.map(|s| s.success()).unwrap_or(false);
+
+        if success || found_qr_url.is_some() {
+            emit_install_event(&app, WECHAT_SCAN_EVENT, "done", "success");
+        } else {
+            emit_install_event(&app, WECHAT_SCAN_EVENT, "done", "error");
+        }
+
+        let has_qr = found_qr_url.is_some();
+        let payload = serde_json::json!({
+            "qrUrl": found_qr_url.unwrap_or_default(),
+            "stdout": stdout_lines.join("\n"),
+            "stderr": stderr_lines.join("\n"),
+        });
+
+        CommandResult {
+            success: success || has_qr,
+            stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+            stderr: if success { String::new() } else { stderr_lines.join("\n") },
+            code,
+        }
+    })
+    .await
+    .unwrap_or_else(|e| CommandResult {
+        success: false,
+        stdout: String::new(),
+        stderr: format!("任务异常: {}", e),
+        code: None,
+    })
+}
+
+fn extract_url(line: &str) -> Option<String> {
+    for word in line.split_whitespace() {
+        let trimmed = word.trim_matches(|c: char| c == '"' || c == '\'' || c == '<' || c == '>' || c == '(' || c == ')');
+        if (trimmed.starts_with("https://") || trimmed.starts_with("http://"))
+            && trimmed.len() > 10
+        {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+#[tauri::command]
+pub(crate) fn get_wechat_plugin_status() -> CommandResult {
+    let config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    let wechat = config
+        .pointer("/channels/wechat")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let accounts = wechat
+        .get("accounts")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let display_name = accounts
+        .values()
+        .next()
+        .and_then(|value| {
+            value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .or_else(|| value.get("botName").and_then(|v| v.as_str()))
+        })
+        .or_else(|| wechat.get("name").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+
+    let channel_configured = !accounts.is_empty()
+        || wechat
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+    let payload = WechatPluginStatusPayload {
+        plugin_installed: wechat_official_plugin_dir().exists(),
+        plugin_enabled: config
+            .pointer(&format!("/plugins/entries/{}/enabled", WECHAT_OFFICIAL_PLUGIN_ID))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        channel_configured,
+        display_name,
+    };
+
+    CommandResult {
+        success: true,
+        stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn install_wechat_plugin(app: AppHandle) -> CommandResult {
+    tokio::task::spawn_blocking(move || {
+        emit_install_event(&app, WECHAT_PLUGIN_EVENT, "info", "正在准备微信 ClawBot 插件...");
+
+        if wechat_official_plugin_dir().exists() {
+            emit_install_event(
+                &app,
+                WECHAT_PLUGIN_EVENT,
+                "info",
+                "检测到微信插件已安装，跳过安装步骤。",
+            );
+        } else {
+            emit_install_event(
+                &app,
+                WECHAT_PLUGIN_EVENT,
+                "info",
+                format!(
+                    "执行安装: npx -y {}@latest install",
+                    WECHAT_OFFICIAL_PLUGIN_PACKAGE
+                ),
+            );
+
+            let install_result = stream_command_to_event(
+                &app,
+                WECHAT_PLUGIN_EVENT,
+                "npx",
+                &[
+                    "-y".to_string(),
+                    format!("{}@latest", WECHAT_OFFICIAL_PLUGIN_PACKAGE),
+                    "install".to_string(),
+                ],
+                &[],
+                None,
+            );
+
+            if !install_result.success {
+                emit_install_event(&app, WECHAT_PLUGIN_EVENT, "done", "error");
+                return install_result;
+            }
+        }
+
+        let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+        ensure_wechat_plugin_entries(&mut config);
+
+        if let Err(error) = write_openclaw_config(&config) {
+            emit_install_event(
+                &app,
+                WECHAT_PLUGIN_EVENT,
+                "error",
+                format!("写入微信插件启用状态失败: {}", error),
+            );
+            emit_install_event(&app, WECHAT_PLUGIN_EVENT, "done", "error");
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            };
+        }
+
+        emit_install_event(
+            &app,
+            WECHAT_PLUGIN_EVENT,
+            "info",
+            "微信 ClawBot 插件安装完成，下一步请在终端中扫码连接微信。",
+        );
+        emit_install_event(&app, WECHAT_PLUGIN_EVENT, "done", "success");
+
+        CommandResult {
+            success: true,
+            stdout: "微信 ClawBot 插件安装完成".to_string(),
+            stderr: String::new(),
+            code: Some(0),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| CommandResult {
+        success: false,
+        stdout: String::new(),
+        stderr: format!("Task panic: {}", error),
+        code: None,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn get_wechat_channel_binding_catalog() -> CommandResult {
+    let config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    let payload = collect_wechat_account_binding_catalog(&config);
+
+    CommandResult {
+        success: true,
+        stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn get_wechat_channel_config(account_id: Option<String>) -> CommandResult {
+    let resolved_account_id = account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    let wechat = config
+        .pointer("/channels/wechat")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let accounts = wechat
+        .get("accounts")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let fallback_account = wechat
+        .get("defaultAccount")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_string())
+        .or_else(|| accounts.keys().next().cloned())
+        .unwrap_or_else(|| "default".to_string());
+    let current_account_id = resolved_account_id.unwrap_or(fallback_account);
+    let account = accounts
+        .get(&current_account_id)
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    let payload = serde_json::json!({
+        "accountId": current_account_id,
+        "displayName": account.get("name")
+            .and_then(|value| value.as_str())
+            .or_else(|| account.get("botName").and_then(|value| value.as_str()))
+            .unwrap_or(""),
+        "enabled": account.get("enabled").and_then(|value| value.as_bool()).unwrap_or(true),
+    });
+
+    CommandResult {
+        success: true,
+        stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn bind_wechat_channel(
+    account_id: String,
+    agent_id: String,
+) -> CommandResult {
+    let account_id = account_id.trim().to_string();
+    let agent_id = agent_id.trim().to_string();
+
+    if account_id.is_empty() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "微信频道账号 ID 不能为空".to_string(),
+            code: Some(1),
+        };
+    }
+    if agent_id.is_empty() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "请先选择要绑定的 Agent".to_string(),
+            code: Some(1),
+        };
+    }
+
+    if let Err(error) = bind_wechat_account_to_agent(&account_id, &agent_id) {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: error,
+            code: Some(1),
+        };
+    }
+
+    restart_gateway_in_background();
+
+    CommandResult {
+        success: true,
+        stdout: format!(
+            "微信频道 {} 已绑定到 Agent {}，网关正在后台刷新",
+            account_id, agent_id
+        ),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn unbind_wechat_channel_account(account_id: String) -> CommandResult {
+    let account_id = account_id.trim().to_string();
+    if account_id.is_empty() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "微信频道账号 ID 不能为空".to_string(),
+            code: Some(1),
+        };
+    }
+
+    if let Err(error) = unbind_wechat_channel_account_internal(&account_id) {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: error,
+            code: Some(1),
+        };
+    }
+
+    restart_gateway_in_background();
+
+    CommandResult {
+        success: true,
+        stdout: format!("微信频道 {} 已解绑，网关正在后台刷新", account_id),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
 fn merge_feishu_channels_from_config(payload: &mut serde_json::Value) {
     let Some(config) = read_openclaw_config() else {
         return;
@@ -2113,6 +2875,7 @@ fn build_channels_snapshot_payload() -> serde_json::Value {
         return payload;
     };
     let feishu_binding_map = read_feishu_account_binding_map(&config);
+    let wechat_binding_map = read_wechat_account_binding_map(&config);
     let agent_name_map = config_agent_name_map(&config);
 
     for (channel_name, channel_value) in channels {
@@ -2136,10 +2899,10 @@ fn build_channels_snapshot_payload() -> serde_json::Value {
                 let enabled = account
                     .and_then(|value| value.get("enabled").and_then(|entry| entry.as_bool()))
                     .unwrap_or(channel_enabled);
-                let bound_agent_id = if channel_name == "feishu" {
-                    feishu_binding_map.get(account_id).cloned()
-                } else {
-                    None
+                let bound_agent_id = match channel_name.as_str() {
+                    "feishu" => feishu_binding_map.get(account_id).cloned(),
+                    "wechat" => wechat_binding_map.get(account_id).cloned(),
+                    _ => None,
                 };
                 let bound_agent_name = bound_agent_id
                     .as_ref()
@@ -2166,10 +2929,10 @@ fn build_channels_snapshot_payload() -> serde_json::Value {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("default");
         let name = channel_snapshot_name(channel, None, account_id);
-        let bound_agent_id = if channel_name == "feishu" {
-            feishu_binding_map.get(account_id).cloned()
-        } else {
-            None
+        let bound_agent_id = match channel_name.as_str() {
+            "feishu" => feishu_binding_map.get(account_id).cloned(),
+            "wechat" => wechat_binding_map.get(account_id).cloned(),
+            _ => None,
         };
         let bound_agent_name = bound_agent_id
             .as_ref()
@@ -2575,6 +3338,125 @@ pub(crate) async fn remove_channel(channel: String, account: Option<String>) -> 
             Ok(_) => CommandResult {
                 success: true,
                 stdout: format!("已移除飞书频道账号 {}", account_id),
+                stderr: String::new(),
+                code: Some(0),
+            },
+            Err(error) => CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            },
+        };
+    }
+
+    if channel.eq_ignore_ascii_case("wechat") {
+        let account_id = account
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("default")
+            .to_string();
+        let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+
+        let has_wechat = config.pointer("/channels/wechat").is_some();
+        if !has_wechat {
+            return CommandResult {
+                success: true,
+                stdout: "微信频道配置已不存在".to_string(),
+                stderr: String::new(),
+                code: Some(0),
+            };
+        }
+
+        let has_account_map = config
+            .pointer("/channels/wechat/accounts")
+            .and_then(|value| value.as_object())
+            .map(|value| !value.is_empty())
+            .unwrap_or(false);
+
+        if !has_account_map {
+            if let Some(channels) = config
+                .get_mut("channels")
+                .and_then(|value| value.as_object_mut())
+            {
+                channels.remove("wechat");
+            }
+            if let Some(bindings) = config
+                .get_mut("bindings")
+                .and_then(|value| value.as_array_mut())
+            {
+                bindings.retain(|b| !is_wechat_route_binding(b));
+            }
+            return match write_openclaw_config(&config) {
+                Ok(_) => CommandResult {
+                    success: true,
+                    stdout: "已移除微信频道配置".to_string(),
+                    stderr: String::new(),
+                    code: Some(0),
+                },
+                Err(error) => CommandResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: error,
+                    code: Some(1),
+                },
+            };
+        }
+
+        if let Some(accounts) = config
+            .pointer_mut("/channels/wechat/accounts")
+            .and_then(|value| value.as_object_mut())
+        {
+            accounts.remove(&account_id);
+
+            let remaining = accounts.keys().cloned().collect::<Vec<_>>();
+            if remaining.is_empty() {
+                if let Some(channels) = config
+                    .get_mut("channels")
+                    .and_then(|value| value.as_object_mut())
+                {
+                    channels.remove("wechat");
+                }
+                if let Some(bindings) = config
+                    .get_mut("bindings")
+                    .and_then(|value| value.as_array_mut())
+                {
+                    bindings.retain(|b| !is_wechat_route_binding(b));
+                }
+            } else {
+                let current_default = config
+                    .pointer("/channels/wechat/defaultAccount")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                if current_default == account_id {
+                    config["channels"]["wechat"]["defaultAccount"] =
+                        serde_json::json!(remaining[0].clone());
+                }
+                if let Some(bindings) = config
+                    .get_mut("bindings")
+                    .and_then(|value| value.as_array_mut())
+                {
+                    bindings.retain(|binding| {
+                        if !is_wechat_route_binding(binding) {
+                            return true;
+                        }
+                        binding
+                            .get("match")
+                            .and_then(|value| value.get("accountId"))
+                            .and_then(|value| value.as_str())
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .is_none_or(|value| value != account_id)
+                    });
+                }
+            }
+        }
+
+        return match write_openclaw_config(&config) {
+            Ok(_) => CommandResult {
+                success: true,
+                stdout: format!("已移除微信频道账号 {}", account_id),
                 stderr: String::new(),
                 code: Some(0),
             },

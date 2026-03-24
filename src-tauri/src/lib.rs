@@ -88,6 +88,13 @@ pub fn run() {
             channels::get_channel_status,
             channels::save_feishu_multi_agent_bindings,
             channels::save_feishu_channel,
+            channels::start_wechat_scan_session,
+            channels::get_wechat_plugin_status,
+            channels::install_wechat_plugin,
+            channels::get_wechat_channel_binding_catalog,
+            channels::get_wechat_channel_config,
+            channels::bind_wechat_channel,
+            channels::unbind_wechat_channel_account,
             channels::remove_channel,
         ])
         .run(tauri::generate_context!())

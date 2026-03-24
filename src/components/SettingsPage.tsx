@@ -13,6 +13,12 @@ import ModuleTabs, { type ModuleTabItem } from "@/components/ui/module-tabs";
 import PageShell from "@/components/PageShell";
 import type { SystemInfo, CommandResult, LogEntry } from "@/types";
 
+let hasAutoCheckedUpdateSignals = false;
+let cachedUpdateStatusSnapshot: UpdateStatusSnapshot | null = null;
+let cachedGithubReleaseSnapshot: GithubReleaseSnapshot | null = null;
+let cachedUpdateStatusError = "";
+let cachedGithubReleaseError = "";
+
 interface UninstallEvent {
   level: string;
   message: string;
@@ -144,13 +150,18 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
       if (snapshot) {
         setUpdateSnapshot(snapshot);
         setUpdateStatusError("");
-      } else {
-        setUpdateSnapshot(null);
-        setUpdateStatusError(formatUpdateStatusFailure(result));
+        return { snapshot, error: "" };
       }
-    } catch (error) {
+
+      const errorMessage = formatUpdateStatusFailure(result);
       setUpdateSnapshot(null);
-      setUpdateStatusError(`${error}`);
+      setUpdateStatusError(errorMessage);
+      return { snapshot: null, error: errorMessage };
+    } catch (error) {
+      const errorMessage = `${error}`;
+      setUpdateSnapshot(null);
+      setUpdateStatusError(errorMessage);
+      return { snapshot: null, error: errorMessage };
     } finally {
       setUpdateStatusLoading(false);
     }
@@ -164,24 +175,60 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
       const snapshot = parseGithubRelease(result);
       if (snapshot) {
         setGithubRelease(snapshot);
-      } else {
-        setGithubRelease(null);
-        setGithubReleaseError(result.stderr || "无法读取 GitHub Releases");
+        return { snapshot, error: "" };
       }
-    } catch (error) {
+
+      const errorMessage = result.stderr || "无法读取 GitHub Releases";
       setGithubRelease(null);
-      setGithubReleaseError(`${error}`);
+      setGithubReleaseError(errorMessage);
+      return { snapshot: null, error: errorMessage };
+    } catch (error) {
+      const errorMessage = `${error}`;
+      setGithubRelease(null);
+      setGithubReleaseError(errorMessage);
+      return { snapshot: null, error: errorMessage };
     } finally {
       setGithubReleaseLoading(false);
     }
   }, []);
 
-  const refreshUpdateSignals = useCallback(async () => {
-    await Promise.allSettled([refreshUpdateStatus(), refreshGithubRelease()]);
+  const refreshUpdateSignals = useCallback(async (force = false) => {
+    if (!force && hasAutoCheckedUpdateSignals) {
+      setUpdateSnapshot(cachedUpdateStatusSnapshot);
+      setGithubRelease(cachedGithubReleaseSnapshot);
+      setUpdateStatusError(cachedUpdateStatusError);
+      setGithubReleaseError(cachedGithubReleaseError);
+      return;
+    }
+
+    const [statusResult, githubResult] = await Promise.allSettled([
+      refreshUpdateStatus(),
+      refreshGithubRelease(),
+    ]);
+
+    hasAutoCheckedUpdateSignals = true;
+
+    if (statusResult.status === "fulfilled") {
+      cachedUpdateStatusSnapshot = statusResult.value.snapshot;
+      cachedUpdateStatusError = statusResult.value.error;
+    }
+
+    if (githubResult.status === "fulfilled") {
+      cachedGithubReleaseSnapshot = githubResult.value.snapshot;
+      cachedGithubReleaseError = githubResult.value.error;
+    }
   }, [refreshGithubRelease, refreshUpdateStatus]);
 
   useEffect(() => {
-    void refreshUpdateSignals();
+    if (!hasAutoCheckedUpdateSignals) {
+      void refreshUpdateSignals();
+      return;
+    }
+
+    setUpdateSnapshot(cachedUpdateStatusSnapshot);
+    setGithubRelease(cachedGithubReleaseSnapshot);
+    setUpdateStatusError(cachedUpdateStatusError);
+    setGithubReleaseError(cachedGithubReleaseError);
   }, [refreshUpdateSignals]);
 
   useEffect(() => {
@@ -196,7 +243,7 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
         setUpdatePhase("done");
         if (ok) {
           void refreshSystemInfo();
-          void refreshUpdateSignals();
+          void refreshUpdateSignals(true);
         }
         return;
       }
@@ -394,7 +441,7 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
               当前版本 {currentVersion}，集中管理维护工具、更新、路径和卸载操作。
             </p>
           </div>
-          <Button size="sm" variant="outline" onClick={() => { void refreshSystemInfo(); void refreshUpdateSignals(); }} disabled={updateStatusLoading || githubReleaseLoading || updatePhase === "running" || uninstallPhase === "running"}>
+          <Button size="sm" variant="outline" onClick={() => { void refreshSystemInfo(); void refreshUpdateSignals(true); }} disabled={updateStatusLoading || githubReleaseLoading || updatePhase === "running" || uninstallPhase === "running"}>
             {(updateStatusLoading || githubReleaseLoading) ? <Loader2 className="animate-spin" /> : <RefreshCw />}
             {(updateStatusLoading || githubReleaseLoading) ? "检查中..." : "刷新状态"}
           </Button>
@@ -524,7 +571,7 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
                     </p>
                   </div>
                 </div>
-                <Button size="sm" variant="ghost" onClick={() => void refreshUpdateSignals()} disabled={updateStatusLoading || githubReleaseLoading || updatePhase === "running"}>
+                <Button size="sm" variant="ghost" onClick={() => void refreshUpdateSignals(true)} disabled={updateStatusLoading || githubReleaseLoading || updatePhase === "running"}>
                   {updateStatusLoading || githubReleaseLoading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
                   {updateStatusLoading || githubReleaseLoading ? "检查中..." : "检查状态"}
                 </Button>
@@ -636,7 +683,7 @@ export default function SettingsPage({ systemInfo, onSystemInfoRefresh, onUninst
                             清空记录
                           </Button>
                         )}
-                        <Button size="sm" variant="outline" onClick={() => { void refreshSystemInfo(); void refreshUpdateSignals(); }}>
+                        <Button size="sm" variant="outline" onClick={() => { void refreshSystemInfo(); void refreshUpdateSignals(true); }}>
                           刷新版本
                         </Button>
                       </div>
