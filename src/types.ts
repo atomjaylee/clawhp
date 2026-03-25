@@ -51,7 +51,7 @@ export interface GatewayStatus {
   lastCheck?: Date;
   recovering?: boolean;
 }
-export type DashboardTab = "dashboard" | "channels" | "skills" | "agents" | "models" | "settings";
+export type DashboardTab = "dashboard" | "channels" | "skills" | "agents" | "models" | "usage" | "settings";
 
 export interface SkillInfo {
   name: string;

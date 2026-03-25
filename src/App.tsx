@@ -12,6 +12,7 @@ import SkillsPage from "@/components/SkillsPage";
 import AgentsPage from "@/components/AgentsPage";
 import ModelsPage from "@/components/ModelsPage";
 import ChannelsPage from "@/components/ChannelsPage";
+import UsagePage from "@/components/UsagePage";
 import SettingsPage from "@/components/SettingsPage";
 import WelcomeStep from "@/components/WelcomeStep";
 import SystemCheckStep from "@/components/SystemCheckStep";
@@ -27,6 +28,7 @@ const PAGE_TITLES: Record<DashboardTab, string> = {
   skills: "Skills",
   agents: "Agents",
   models: "模型管理",
+  usage: "用量统计",
   settings: "设置",
 };
 
@@ -218,6 +220,8 @@ export default function App() {
           return <ModelsPage />;
         case "channels":
           return <ChannelsPage />;
+        case "usage":
+          return <UsagePage />;
         case "settings":
           return (
             <SettingsPage

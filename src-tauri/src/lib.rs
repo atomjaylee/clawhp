@@ -11,6 +11,7 @@ mod system;
 mod terminal;
 mod types;
 mod update;
+mod usage;
 mod util;
 
 pub(crate) use install::stream_command_to_event;
@@ -98,6 +99,7 @@ pub fn run() {
             channels::bind_wechat_channel,
             channels::unbind_wechat_channel_account,
             channels::remove_channel,
+            usage::get_usage_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

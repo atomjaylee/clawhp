@@ -8,6 +8,7 @@ import {
   Search,
   CheckCircle2,
   MessageSquare,
+  BarChart3,
   Home,
   type LucideIcon,
 } from "lucide-react";
@@ -42,6 +43,7 @@ const dashboardNav: { id: DashboardTab; label: string; icon: LucideIcon }[] = [
   { id: "skills", label: "Skills", icon: Puzzle },
   { id: "agents", label: "Agents", icon: Bot },
   { id: "models", label: "模型管理", icon: Box },
+  { id: "usage", label: "用量统计", icon: BarChart3 },
   { id: "settings", label: "设置", icon: Settings },
 ];
 
