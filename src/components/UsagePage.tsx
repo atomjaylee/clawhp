@@ -53,9 +53,19 @@ interface RankedEntry {
   extra?: string;
 }
 
+interface SnapshotHealth {
+  partial: boolean;
+  indexedFiles: number;
+  liveSessions: number;
+  archivedFiles: number;
+  providerUsageEnriched: boolean;
+  warnings: string[];
+}
+
 interface UsageSnapshot {
-  source: "gateway_api" | "status" | "empty";
+  source: "gateway_api" | "status" | "local_logs" | "empty";
   apiPath?: string;
+  health?: SnapshotHealth;
   // core metrics
   messages: number;
   userMessages: number;
@@ -182,6 +192,19 @@ function emptySnapshot(source: UsageSnapshot["source"] = "empty"): UsageSnapshot
   };
 }
 
+function parseHealth(value: unknown): SnapshotHealth | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const health = value as Record<string, unknown>;
+  return {
+    partial: Boolean(health.partial),
+    indexedFiles: pickNum(health, "indexedFiles", "indexed_files"),
+    liveSessions: pickNum(health, "liveSessions", "live_sessions"),
+    archivedFiles: pickNum(health, "archivedFiles", "archived_files"),
+    providerUsageEnriched: Boolean(health.providerUsageEnriched ?? health.provider_usage_enriched),
+    warnings: Array.isArray(health.warnings) ? health.warnings.map((item) => ns(item)).filter(Boolean) : [],
+  };
+}
+
 function parseGatewayApi(data: Record<string, unknown>, path: string): UsageSnapshot {
   const msgObj = pickObj(data, "messages", "message_stats");
   const tokObj = pickObj(data, "tokens", "token_stats", "token_usage");
@@ -283,6 +306,11 @@ function parseResponse(raw: string): UsageSnapshot {
     return parseGatewayApi(data, path);
   }
 
+  if (src === "local_logs") {
+    const parsed = parseGatewayApi(json, "local_logs");
+    return { ...parsed, source: "local_logs", health: parseHealth(json.health) };
+  }
+
   if (src === "status") {
     const status = (json.status ?? {}) as Record<string, unknown>;
     return parseStatusFallback(status);
@@ -337,6 +365,9 @@ export default function UsagePage() {
 
   const hasData = data.totalTokens > 0 || data.messages > 0 || data.models.length > 0;
   const hasBreakdowns = data.providers.length > 0 || data.channels.length > 0 || data.tools.length > 0 || data.agents.length > 0;
+  const subtitle = data.source === "local_logs"
+    ? `基于本地会话与归档日志聚合${data.health?.partial ? "（部分明细已降级）" : ""}`
+    : "跟踪 Token 消耗和 API 请求，了解各模型的资源使用分布";
 
   const moduleTabs: ModuleTabItem<UsageModuleTab>[] = [
     { id: "overview", label: "概览", icon: BarChart3 },
@@ -351,12 +382,16 @@ export default function UsagePage() {
         <div className="flex items-center justify-between gap-3">
           <div>
             <h2 className="text-sm font-semibold">用量统计</h2>
-            <p className="text-[11px] text-muted-foreground">跟踪 Token 消耗和 API 请求，了解各模型的资源使用分布</p>
+            <p className="text-[11px] text-muted-foreground">{subtitle}</p>
           </div>
           <div className="flex items-center gap-2">
             {data.source !== "empty" && (
               <Badge variant="outline" className="border-white/[0.08] bg-white/[0.03] text-[10px] text-muted-foreground">
-                {data.source === "gateway_api" ? "网关 API" : "CLI 快照"}
+                {data.source === "gateway_api"
+                  ? "网关 API"
+                  : data.source === "local_logs"
+                    ? "本地日志"
+                    : "CLI 快照"}
               </Badge>
             )}
             <Button size="sm" variant="outline" onClick={() => void fetchUsage()} disabled={loading}>
@@ -436,7 +471,7 @@ function MetricsGrid({ data, loading }: { data: UsageSnapshot; loading: boolean 
                 <MiniStat label="缓存命中率" value={fPct(data.cacheHitRate)} icon={Database} color="text-emerald-400"
                   sub={data.cachedTokens > 0 ? `${ft(data.cachedTokens)} cached · ${ft(data.promptTokens)} prompt` : undefined} />
               )}
-              {data.errorRate >= 0 && data.source === "gateway_api" && (
+              {data.errorRate >= 0 && data.source !== "status" && data.source !== "empty" && (
                 <MiniStat label="错误率" value={fPct(data.errorRate)} icon={AlertCircle}
                   color={data.errorRate > 0 ? "text-red-400" : "text-emerald-400"} />
               )}
@@ -951,7 +986,7 @@ function EmptyState({ loading }: { loading: boolean }) {
         </div>
         <h3 className="mt-5 text-[14px] font-semibold text-foreground/80">暂无用量数据</h3>
         <p className="mt-2 max-w-md text-center text-[12px] leading-relaxed text-muted-foreground">
-          当网关处理 API 请求后，Token 消耗和请求统计将自动出现在这里。请确保网关已启动并有活跃会话。
+          当会话产生回复后，用量会从本地日志或运行时快照自动汇总到这里。请确保 OpenClaw 已启动并存在活跃会话。
         </p>
       </CardContent>
     </Card>
