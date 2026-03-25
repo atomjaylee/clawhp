@@ -387,7 +387,12 @@ export default function UsagePage() {
   useEffect(() => { void fetchUsage(); }, [fetchUsage]);
 
   const hasData = data.totalTokens > 0 || data.messages > 0 || data.models.length > 0;
+  const isRefreshing = loading && hasData;
   const hasBreakdowns = data.providers.length > 0 || data.channels.length > 0 || data.tools.length > 0 || data.agents.length > 0;
+  const rangeLabel = useMemo(
+    () => `${startDate}${startDate !== endDate ? ` 至 ${endDate}` : ""}`,
+    [endDate, startDate],
+  );
   const subtitle = data.source === "local_logs"
     ? `基于本地会话按 OpenClaw 用量口径聚合${data.health?.partial ? "（部分明细已降级）" : ""}`
     : "跟踪 Token 消耗和 API 请求，了解各模型的资源使用分布";
@@ -452,55 +457,70 @@ export default function UsagePage() {
         </Card>
       )}
 
-      <Card>
-        <CardContent className="flex flex-col gap-3 p-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-wrap items-center gap-2">
-            {([
-              { id: "today", label: "今天" },
-              { id: "7d", label: "7 天" },
-              { id: "30d", label: "30 天" },
-            ] as const).map((item) => (
-              <Button
-                key={item.id}
-                size="sm"
-                variant={preset === item.id ? "default" : "outline"}
-                className={cn("h-8", preset === item.id && "shadow-none")}
-                onClick={() => applyPreset(item.id)}
-              >
-                {item.label}
-              </Button>
-            ))}
+      <div className="relative">
+        {isRefreshing && <RefreshOverlay rangeLabel={rangeLabel} />}
 
-            <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5">
-              <input
-                type="date"
-                value={startDate}
-                onChange={(event) => updateStartDate(event.target.value)}
-                className="bg-transparent text-[11px] text-foreground/85 outline-none"
-              />
-              <span className="text-[10px] text-muted-foreground">至</span>
-              <input
-                type="date"
-                value={endDate}
-                onChange={(event) => updateEndDate(event.target.value)}
-                className="bg-transparent text-[11px] text-foreground/85 outline-none"
-              />
-            </div>
-          </div>
+        <div className={cn("space-y-4 transition-opacity duration-200", isRefreshing && "pointer-events-none select-none")}>
+          <Card>
+            <CardContent className="flex flex-col gap-3 p-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex flex-wrap items-center gap-2">
+                {([
+                  { id: "today", label: "今天" },
+                  { id: "7d", label: "7 天" },
+                  { id: "30d", label: "30 天" },
+                ] as const).map((item) => (
+                  <Button
+                    key={item.id}
+                    size="sm"
+                    variant={preset === item.id ? "default" : "outline"}
+                    className={cn("h-8", preset === item.id && "shadow-none")}
+                    onClick={() => applyPreset(item.id)}
+                    disabled={loading}
+                  >
+                    {item.label}
+                  </Button>
+                ))}
 
-          <div className="text-[11px] text-muted-foreground">
-            当前范围：{startDate}{startDate !== endDate ? ` 至 ${endDate}` : ""}
-          </div>
-        </CardContent>
-      </Card>
+                <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5">
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={(event) => updateStartDate(event.target.value)}
+                    disabled={loading}
+                    className="bg-transparent text-[11px] text-foreground/85 outline-none disabled:cursor-not-allowed disabled:opacity-60"
+                  />
+                  <span className="text-[10px] text-muted-foreground">至</span>
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(event) => updateEndDate(event.target.value)}
+                    disabled={loading}
+                    className="bg-transparent text-[11px] text-foreground/85 outline-none disabled:cursor-not-allowed disabled:opacity-60"
+                  />
+                </div>
+              </div>
 
-      <MetricsGrid data={data} loading={loading && !hasData} />
+              <div className="flex flex-wrap items-center justify-end gap-2 text-[11px] text-muted-foreground">
+                {isRefreshing && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2.5 py-1 text-cyan-300">
+                    <Loader2 size={12} className="animate-spin" />
+                    正在切换时间范围
+                  </span>
+                )}
+                <span>当前范围：{rangeLabel}</span>
+              </div>
+            </CardContent>
+          </Card>
 
-      <ModuleTabs items={moduleTabs} value={tab} onValueChange={setTab} />
+          <MetricsGrid data={data} loading={loading && !hasData} />
 
-      {tab === "overview" && (hasData ? <OverviewContent data={data} /> : <EmptyState loading={loading} />)}
-      {tab === "models" && (hasData ? <ModelDetailContent models={data.models} totalTokens={data.totalTokens} /> : <EmptyState loading={loading} />)}
-      {tab === "details" && <DetailsContent data={data} />}
+          <ModuleTabs items={moduleTabs} value={tab} onValueChange={setTab} />
+
+          {tab === "overview" && (hasData ? <OverviewContent data={data} /> : <EmptyState loading={loading} />)}
+          {tab === "models" && (hasData ? <ModelDetailContent models={data.models} totalTokens={data.totalTokens} /> : <EmptyState loading={loading} />)}
+          {tab === "details" && <DetailsContent data={data} />}
+        </div>
+      </div>
     </PageShell>
   );
 }
@@ -576,6 +596,23 @@ function MetricsGrid({ data, loading }: { data: UsageSnapshot; loading: boolean 
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function RefreshOverlay({ rangeLabel }: { rangeLabel: string }) {
+  return (
+    <div className="absolute inset-0 z-20 flex items-start justify-center rounded-[28px] bg-slate-950/58 backdrop-blur-[2px]">
+      <div className="mt-14 flex min-w-[220px] items-center gap-3 rounded-2xl border border-cyan-400/20 bg-slate-950/90 px-4 py-3 shadow-[0_18px_60px_rgba(8,15,32,0.45)]">
+        <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-cyan-400/20 bg-cyan-400/10 text-cyan-300">
+          <span className="absolute inset-0 rounded-full border border-cyan-300/25 animate-ping" />
+          <Loader2 size={16} className="relative animate-spin" />
+        </div>
+        <div className="min-w-0">
+          <div className="text-[12px] font-medium text-foreground/90">正在加载该时间范围的统计</div>
+          <div className="mt-1 truncate text-[10px] text-muted-foreground">{rangeLabel}</div>
+        </div>
+      </div>
+    </div>
   );
 }
 
