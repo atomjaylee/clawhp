@@ -28,8 +28,7 @@ pub(crate) async fn start_gateway(port: Option<u16>) -> CommandResult {
             };
         }
 
-        let (ready, last_status) =
-            install::wait_for_gateway_ready(port, 6, Duration::from_secs(2));
+        let (ready, last_status) = install::wait_for_gateway_ready(port, 6, Duration::from_secs(2));
         if ready {
             CommandResult {
                 success: true,
@@ -426,20 +425,12 @@ pub(crate) async fn restart_gateway_with_recovery(
             },
         );
 
-        let stop = run_logged_openclaw_command(
-            &app,
-            "gateway-log",
-            &stop_args,
-            Duration::from_secs(15),
-        );
+        let stop =
+            run_logged_openclaw_command(&app, "gateway-log", &stop_args, Duration::from_secs(15));
         std::thread::sleep(Duration::from_millis(1200));
 
-        let start = run_logged_openclaw_command(
-            &app,
-            "gateway-log",
-            &start_args,
-            Duration::from_secs(20),
-        );
+        let start =
+            run_logged_openclaw_command(&app, "gateway-log", &start_args, Duration::from_secs(20));
         let (ready_after_start, _) =
             install::wait_for_gateway_ready(port, 6, Duration::from_secs(2));
 
@@ -467,12 +458,8 @@ pub(crate) async fn restart_gateway_with_recovery(
             },
         );
 
-        let doctor = run_logged_openclaw_command(
-            &app,
-            "gateway-log",
-            &doctor_args,
-            Duration::from_secs(30),
-        );
+        let doctor =
+            run_logged_openclaw_command(&app, "gateway-log", &doctor_args, Duration::from_secs(30));
         if doctor.success {
             let _ = app.emit(
                 "gateway-log",
@@ -598,10 +585,7 @@ pub(crate) fn get_gateway_logs() -> CommandResult {
                 success: false,
                 stdout: String::new(),
                 stderr: if gateway_status.stderr.is_empty() {
-                    format!(
-                        "日志文件不存在，且无法读取网关状态: {}",
-                        log_path.display()
-                    )
+                    format!("日志文件不存在，且无法读取网关状态: {}", log_path.display())
                 } else {
                     format!(
                         "日志文件不存在（{}），且无法读取网关状态: {}",

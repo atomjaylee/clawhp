@@ -45,9 +45,9 @@ fn provider_api_from_config(provider: &serde_json::Value) -> String {
                 .get("models")
                 .and_then(|value| value.as_array())
                 .and_then(|models| {
-                    models.iter().find_map(|model| {
-                        model.get("api").and_then(|value| value.as_str())
-                    })
+                    models
+                        .iter()
+                        .find_map(|model| model.get("api").and_then(|value| value.as_str()))
                 })
         })
         .map(|value| normalize_provider_api(Some(value)).to_string())
@@ -155,7 +155,11 @@ pub(crate) fn get_primary_model() -> String {
 }
 
 #[tauri::command]
-pub(crate) fn fetch_remote_models(base_url: String, api_key: String, api_adapter: Option<String>) -> CommandResult {
+pub(crate) fn fetch_remote_models(
+    base_url: String,
+    api_key: String,
+    api_adapter: Option<String>,
+) -> CommandResult {
     let provider_api = normalize_provider_api(api_adapter.as_deref());
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut args = vec![
@@ -206,7 +210,10 @@ pub(crate) fn fetch_remote_models(base_url: String, api_key: String, api_adapter
         return CommandResult {
             success: false,
             stdout: String::new(),
-            stderr: format!("API 请求失败 (HTTP {})，请检查地址、Key 和兼容协议", http_code),
+            stderr: format!(
+                "API 请求失败 (HTTP {})，请检查地址、Key 和兼容协议",
+                http_code
+            ),
             code: Some(1),
         };
     }
@@ -650,7 +657,11 @@ pub(crate) fn sync_models_to_provider(
             if new_models.is_empty() {
                 parts.push(format!("{} 的模型列表未变化", provider_name));
             } else {
-                parts.push(format!("已添加 {} 个模型到 {}", new_models.len(), provider_name));
+                parts.push(format!(
+                    "已添加 {} 个模型到 {}",
+                    new_models.len(),
+                    provider_name
+                ));
             }
 
             if skip > 0 {
@@ -984,7 +995,10 @@ pub(crate) fn set_primary_model(model_ref: String) -> CommandResult {
 }
 
 #[tauri::command]
-pub(crate) fn remove_models_from_provider(provider_name: String, model_ids: Vec<String>) -> CommandResult {
+pub(crate) fn remove_models_from_provider(
+    provider_name: String,
+    model_ids: Vec<String>,
+) -> CommandResult {
     let mut config = match read_openclaw_config() {
         Some(c) => c,
         None => {

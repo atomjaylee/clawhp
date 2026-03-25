@@ -6,8 +6,8 @@ use crate::config::{
     run_openclaw_args_timeout, write_openclaw_config,
 };
 use crate::event::emit_install_event;
-use crate::stream_command_to_event;
 use crate::state::normalize_agent_id_key;
+use crate::stream_command_to_event;
 use crate::terminal::open_in_external_terminal;
 use crate::types::CommandResult;
 use crate::util::path::{get_openclaw_home, get_openclaw_program};
@@ -1287,7 +1287,9 @@ pub(crate) fn get_feishu_multi_agent_bindings() -> CommandResult {
 }
 
 #[tauri::command]
-pub(crate) fn save_feishu_multi_agent_bindings(routes: Vec<FeishuRouteBindingPayload>) -> CommandResult {
+pub(crate) fn save_feishu_multi_agent_bindings(
+    routes: Vec<FeishuRouteBindingPayload>,
+) -> CommandResult {
     let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
     if !config.is_object() {
         config = serde_json::json!({});
@@ -1450,7 +1452,10 @@ pub(crate) async fn install_feishu_plugin(app: AppHandle) -> CommandResult {
 }
 
 #[tauri::command]
-pub(crate) async fn start_feishu_auth_session(env: Option<String>, lane: Option<String>) -> CommandResult {
+pub(crate) async fn start_feishu_auth_session(
+    env: Option<String>,
+    lane: Option<String>,
+) -> CommandResult {
     let env = normalize_feishu_env(env.as_deref()).to_string();
 
     let init_response = match post_feishu_registration(
@@ -1760,7 +1765,9 @@ pub(crate) async fn complete_feishu_plugin_binding(
 }
 
 #[tauri::command]
-pub(crate) async fn refresh_feishu_channel_display_names(account_id: Option<String>) -> CommandResult {
+pub(crate) async fn refresh_feishu_channel_display_names(
+    account_id: Option<String>,
+) -> CommandResult {
     let target_account_id = account_id
         .as_deref()
         .map(str::trim)
@@ -2344,10 +2351,7 @@ pub(crate) async fn start_wechat_auth_session() -> CommandResult {
 #[tauri::command]
 pub(crate) async fn poll_wechat_auth_session(qrcode: String) -> CommandResult {
     let base = wechat_api_base_url();
-    let url = format!(
-        "{}/ilink/bot/get_qrcode_status",
-        base,
-    );
+    let url = format!("{}/ilink/bot/get_qrcode_status", base,);
 
     let client = Client::builder()
         .timeout(Duration::from_secs(40))
@@ -2502,8 +2506,7 @@ pub(crate) fn save_wechat_auth_result(
         "botToken": bot_token,
         "name": format!("微信 ClawBot ({})", &account_id[..account_id.len().min(8)]),
     });
-    config["channels"][WECHAT_CHANNEL_KEY]["defaultAccount"] =
-        serde_json::json!(account_id);
+    config["channels"][WECHAT_CHANNEL_KEY]["defaultAccount"] = serde_json::json!(account_id);
 
     if let Some(uid) = user_id.as_deref().filter(|v| !v.trim().is_empty()) {
         let allow_from = config["channels"][WECHAT_CHANNEL_KEY]["accounts"][&account_id]
@@ -2581,7 +2584,10 @@ pub(crate) fn get_wechat_plugin_status() -> CommandResult {
     let payload = WechatPluginStatusPayload {
         plugin_installed: wechat_official_plugin_dir().exists(),
         plugin_enabled: config
-            .pointer(&format!("/plugins/entries/{}/enabled", WECHAT_OFFICIAL_PLUGIN_ID))
+            .pointer(&format!(
+                "/plugins/entries/{}/enabled",
+                WECHAT_OFFICIAL_PLUGIN_ID
+            ))
             .and_then(|value| value.as_bool())
             .unwrap_or(false),
         channel_configured,
@@ -2599,7 +2605,12 @@ pub(crate) fn get_wechat_plugin_status() -> CommandResult {
 #[tauri::command]
 pub(crate) async fn install_wechat_plugin(app: AppHandle) -> CommandResult {
     tokio::task::spawn_blocking(move || {
-        emit_install_event(&app, WECHAT_PLUGIN_EVENT, "info", "正在准备微信 ClawBot 插件...");
+        emit_install_event(
+            &app,
+            WECHAT_PLUGIN_EVENT,
+            "info",
+            "正在准备微信 ClawBot 插件...",
+        );
 
         if wechat_official_plugin_dir().exists() {
             emit_install_event(
@@ -2745,10 +2756,7 @@ pub(crate) fn get_wechat_channel_config(account_id: Option<String>) -> CommandRe
 }
 
 #[tauri::command]
-pub(crate) fn bind_wechat_channel(
-    account_id: String,
-    agent_id: String,
-) -> CommandResult {
+pub(crate) fn bind_wechat_channel(account_id: String, agent_id: String) -> CommandResult {
     let account_id = account_id.trim().to_string();
     let agent_id = agent_id.trim().to_string();
 
@@ -3523,7 +3531,9 @@ pub(crate) async fn remove_channel(channel: String, account: Option<String>) -> 
             .to_string();
         let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
 
-        let has_wechat = config.pointer(&format!("/channels/{}", WECHAT_CHANNEL_KEY)).is_some();
+        let has_wechat = config
+            .pointer(&format!("/channels/{}", WECHAT_CHANNEL_KEY))
+            .is_some();
         if !has_wechat {
             return CommandResult {
                 success: true,

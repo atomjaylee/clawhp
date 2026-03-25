@@ -473,7 +473,11 @@ pub(crate) fn check_port(port: u16) -> bool {
     .is_ok()
 }
 
-pub(crate) fn wait_for_gateway_ready(port: u16, attempts: usize, delay: Duration) -> (bool, CommandResult) {
+pub(crate) fn wait_for_gateway_ready(
+    port: u16,
+    attempts: usize,
+    delay: Duration,
+) -> (bool, CommandResult) {
     let gateway_status_args = vec![
         "gateway".to_string(),
         "status".to_string(),

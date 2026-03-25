@@ -1,11 +1,13 @@
 //! Skills discovery, marketplace, and installation.
 
-use crate::config::{parse_json_value_from_output, read_openclaw_config, run_openclaw_args_timeout};
+use crate::config::{
+    parse_json_value_from_output, read_openclaw_config, run_openclaw_args_timeout,
+};
 use crate::types::CommandResult;
 use crate::util::command::run_cmd_owned_timeout;
 use crate::util::path::{
-    command_exists, collect_openclaw_install_paths, get_openclaw_home,
-    refresh_path, resolve_openclaw_binary_path,
+    collect_openclaw_install_paths, command_exists, get_openclaw_home, refresh_path,
+    resolve_openclaw_binary_path,
 };
 use reqwest::Url;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -382,14 +384,11 @@ fn extract_frontmatter_scalar(content: &str, key: &str) -> Option<String> {
     let prefix = format!("{}:", key);
     let frontmatter = extract_frontmatter_block(content)?;
 
-    frontmatter
-        .lines()
-        .map(str::trim)
-        .find_map(|line| {
-            line.strip_prefix(&prefix)
-                .map(trim_frontmatter_scalar)
-                .filter(|value| !value.is_empty())
-        })
+    frontmatter.lines().map(str::trim).find_map(|line| {
+        line.strip_prefix(&prefix)
+            .map(trim_frontmatter_scalar)
+            .filter(|value| !value.is_empty())
+    })
 }
 
 fn parse_skill_markdown_metadata_from_content(
@@ -462,7 +461,11 @@ fn build_managed_skill_lookup(managed_skills: &[SkillInfo]) -> BTreeMap<String, 
 fn config_path_satisfied(config: &serde_json::Value, dotted_path: &str) -> bool {
     let mut current = config;
 
-    for segment in dotted_path.split('.').map(str::trim).filter(|value| !value.is_empty()) {
+    for segment in dotted_path
+        .split('.')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         let Some(next) = current.get(segment) else {
             return false;
         };
@@ -601,9 +604,10 @@ fn collect_openclaw_skills_from_dir(
             install_hints: collect_skill_install_hints(&summary.metadata.install),
             managed_installed: managed_skill.is_some(),
             managed_version: managed_skill.and_then(|skill| {
-                skill.installed_version.clone().or_else(|| {
-                    (skill.version != "unknown").then(|| skill.version.clone())
-                })
+                skill
+                    .installed_version
+                    .clone()
+                    .or_else(|| (skill.version != "unknown").then(|| skill.version.clone()))
             }),
             managed_path: managed_skill.map(|skill| skill.path.clone()),
         });
@@ -1303,7 +1307,10 @@ fn build_skills_dashboard_snapshot() -> SkillsDashboardSnapshot {
                 .iter()
                 .filter(|skill| skill.source == "openclaw-workspace")
                 .count(),
-            eligible_count: openclaw_skills.iter().filter(|skill| skill.eligible).count(),
+            eligible_count: openclaw_skills
+                .iter()
+                .filter(|skill| skill.eligible)
+                .count(),
             missing_requirement_count: openclaw_skills
                 .iter()
                 .filter(|skill| !skill.missing.is_empty())

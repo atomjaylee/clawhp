@@ -174,9 +174,23 @@ fn build_usage_snapshot(start_date: Option<String>, end_date: Option<String>) ->
             };
         }
     };
+
+    if let Some(snapshot) = read_gateway_sessions_usage_snapshot(&range) {
+        let wrapped = serde_json::json!({
+            "_source": "gateway_api",
+            "_path": "sessions.usage",
+            "data": snapshot,
+        });
+        return CommandResult {
+            success: true,
+            stdout: wrapped.to_string(),
+            stderr: String::new(),
+            code: Some(0),
+        };
+    }
+
     let home = PathBuf::from(get_openclaw_home());
     let status_snapshot = read_status_snapshot();
-
     if let Some(mut snapshot) = aggregate_usage_from_home(&home, &range) {
         if let Some(provider_usage) = status_snapshot
             .as_ref()
@@ -196,9 +210,8 @@ fn build_usage_snapshot(start_date: Option<String>, end_date: Option<String>) ->
 
         return CommandResult {
             success: true,
-            stdout: serde_json::to_string(&wrapped).unwrap_or_else(|_| {
-                serde_json::json!({ "_source": "empty" }).to_string()
-            }),
+            stdout: serde_json::to_string(&wrapped)
+                .unwrap_or_else(|_| serde_json::json!({ "_source": "empty" }).to_string()),
             stderr: String::new(),
             code: Some(0),
         };
@@ -356,7 +369,8 @@ fn discover_transcripts(home: &Path, range: &UsageDateRange) -> TranscriptDiscov
             {
                 Some(Value::Object(entries)) => {
                     for entry in entries.values() {
-                        let Some(path_str) = entry.get("sessionFile").and_then(Value::as_str) else {
+                        let Some(path_str) = entry.get("sessionFile").and_then(Value::as_str)
+                        else {
                             continue;
                         };
                         let path = PathBuf::from(path_str);
@@ -365,7 +379,9 @@ fn discover_transcripts(home: &Path, range: &UsageDateRange) -> TranscriptDiscov
                                 session_scope_key(&agent_id, &session_id),
                                 SessionStoreMetadata {
                                     channel: infer_channel_from_session_entry(entry),
-                                    updated_at_ms: value_to_i64(entry.get("updatedAt").unwrap_or(&Value::Null)),
+                                    updated_at_ms: value_to_i64(
+                                        entry.get("updatedAt").unwrap_or(&Value::Null),
+                                    ),
                                 },
                             );
                         }
@@ -431,8 +447,7 @@ fn discover_transcripts(home: &Path, range: &UsageDateRange) -> TranscriptDiscov
             };
 
             match discovered_by_session.get(&session_id) {
-                Some(existing)
-                    if !should_replace_transcript_descriptor(existing, &candidate) => {}
+                Some(existing) if !should_replace_transcript_descriptor(existing, &candidate) => {}
                 _ => {
                     discovered_by_session.insert(session_id, candidate);
                 }
@@ -514,7 +529,9 @@ fn accumulate_transcript(
                 };
                 let role = message.get("role").and_then(Value::as_str).unwrap_or("");
                 let timestamp_ms = parse_entry_timestamp_ms(&record, message);
-                if timestamp_ms.is_some_and(|timestamp| timestamp < range.start_ms || timestamp > range.end_ms) {
+                if timestamp_ms
+                    .is_some_and(|timestamp| timestamp < range.start_ms || timestamp > range.end_ms)
+                {
                     continue;
                 }
                 match role {
@@ -581,7 +598,10 @@ fn accumulate_transcript(
                             );
                         }
 
-                        let stop_reason = message.get("stopReason").and_then(Value::as_str).unwrap_or("");
+                        let stop_reason = message
+                            .get("stopReason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
                         let has_error = message
                             .get("errorMessage")
                             .and_then(Value::as_str)
@@ -621,10 +641,13 @@ fn observe_tool_calls(acc: &mut UsageAccumulator, content: &Value) {
         };
 
         acc.tool_calls += 1;
-        let tool = acc.tools.entry(name.to_string()).or_insert_with(|| ToolUsageEntry {
-            name: name.to_string(),
-            calls: 0,
-        });
+        let tool = acc
+            .tools
+            .entry(name.to_string())
+            .or_insert_with(|| ToolUsageEntry {
+                name: name.to_string(),
+                calls: 0,
+            });
         tool.calls += 1;
     }
 }
@@ -656,15 +679,18 @@ fn observe_usage(
     acc.total_cost += cost;
 
     let model_key = format!("{provider}::{model}");
-    let model_entry = acc.models.entry(model_key).or_insert_with(|| ModelUsageEntry {
-        name: model.to_string(),
-        provider: Some(provider.to_string()),
-        tokens: 0,
-        input_tokens: 0,
-        output_tokens: 0,
-        messages: 0,
-        cost: 0.0,
-    });
+    let model_entry = acc
+        .models
+        .entry(model_key)
+        .or_insert_with(|| ModelUsageEntry {
+            name: model.to_string(),
+            provider: Some(provider.to_string()),
+            tokens: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            messages: 0,
+            cost: 0.0,
+        });
     model_entry.tokens += total_tokens;
     model_entry.input_tokens += input;
     model_entry.output_tokens += output;
@@ -704,14 +730,10 @@ fn extract_total_cost(usage: &Value) -> f64 {
         return total;
     }
 
-    usage.get("cost")
+    usage
+        .get("cost")
         .and_then(Value::as_object)
-        .map(|costs| {
-            costs
-                .values()
-                .filter_map(Value::as_f64)
-                .sum::<f64>()
-        })
+        .map(|costs| costs.values().filter_map(Value::as_f64).sum::<f64>())
         .unwrap_or(0.0)
 }
 
@@ -749,21 +771,25 @@ fn finalize_tools(entries: HashMap<String, ToolUsageEntry>) -> Vec<ToolUsageEntr
 }
 
 fn infer_channel_from_session_entry(entry: &Value) -> Option<String> {
-    entry.get("lastChannel")
+    entry
+        .get("lastChannel")
         .and_then(Value::as_str)
         .map(normalize_channel)
         .or_else(|| {
-            entry.pointer("/deliveryContext/channel")
+            entry
+                .pointer("/deliveryContext/channel")
                 .and_then(Value::as_str)
                 .map(normalize_channel)
         })
         .or_else(|| {
-            entry.pointer("/origin/provider")
+            entry
+                .pointer("/origin/provider")
                 .and_then(Value::as_str)
                 .map(normalize_channel)
         })
         .or_else(|| {
-            entry.pointer("/origin/surface")
+            entry
+                .pointer("/origin/surface")
                 .and_then(Value::as_str)
                 .map(normalize_channel)
         })
@@ -853,8 +879,14 @@ fn parse_session_id_from_path(path: &Path) -> Option<String> {
 
 fn parse_session_id_from_file_name(name: &str) -> Option<String> {
     name.strip_suffix(".jsonl")
-        .or_else(|| name.split_once(".jsonl.reset.").map(|(session_id, _)| session_id))
-        .or_else(|| name.split_once(".jsonl.deleted.").map(|(session_id, _)| session_id))
+        .or_else(|| {
+            name.split_once(".jsonl.reset.")
+                .map(|(session_id, _)| session_id)
+        })
+        .or_else(|| {
+            name.split_once(".jsonl.deleted.")
+                .map(|(session_id, _)| session_id)
+        })
         .map(str::to_string)
 }
 
@@ -895,10 +927,7 @@ fn parse_usage_date_range(
 
     let start_ms = local_day_start_ms(start_date)?;
     let end_ms = local_day_end_ms(end_date)?;
-    Ok(UsageDateRange {
-        start_ms,
-        end_ms,
-    })
+    Ok(UsageDateRange { start_ms, end_ms })
 }
 
 fn parse_usage_date(raw: &str) -> Result<NaiveDate, String> {
@@ -955,13 +984,343 @@ fn value_to_u64(value: &Value) -> Option<u64> {
         })
 }
 
-fn read_status_snapshot() -> Option<Value> {
-    let args = vec![
-        "status".to_string(),
+fn read_gateway_sessions_usage_snapshot(range: &UsageDateRange) -> Option<LocalUsageSnapshot> {
+    let args = gateway_sessions_usage_args(range)?;
+    let payload = run_openclaw_json(&args, Duration::from_secs(6))?;
+    normalize_gateway_sessions_usage_snapshot(&payload)
+}
+
+fn gateway_sessions_usage_args(range: &UsageDateRange) -> Option<Vec<String>> {
+    let start_date = local_date_from_timestamp_ms(range.start_ms)?.to_string();
+    let end_date = local_date_from_timestamp_ms(range.end_ms)?.to_string();
+    let params = serde_json::json!({
+        "startDate": start_date,
+        "endDate": end_date,
+        "mode": "specific",
+        "utcOffset": local_utc_offset_label(),
+        "limit": 5000,
+    });
+
+    Some(vec![
+        "gateway".to_string(),
+        "call".to_string(),
+        "sessions.usage".to_string(),
         "--json".to_string(),
-        "--usage".to_string(),
-    ];
-    let result = run_openclaw_args_timeout(&args, Duration::from_secs(12));
+        "--params".to_string(),
+        params.to_string(),
+    ])
+}
+
+fn normalize_gateway_sessions_usage_snapshot(payload: &Value) -> Option<LocalUsageSnapshot> {
+    let payload_obj = payload.as_object()?;
+    if !payload_obj.contains_key("totals")
+        && !payload_obj.contains_key("aggregates")
+        && !payload_obj.contains_key("sessions")
+    {
+        return None;
+    }
+
+    let empty_map = serde_json::Map::new();
+    let empty_vec = Vec::new();
+    let totals = payload_obj
+        .get("totals")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_map);
+    let aggregates = payload_obj
+        .get("aggregates")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_map);
+    let messages = aggregates
+        .get("messages")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_map);
+    let tools = aggregates
+        .get("tools")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_map);
+
+    let input_tokens = totals
+        .get("input")
+        .and_then(value_to_u64)
+        .unwrap_or_default();
+    let output_tokens = totals
+        .get("output")
+        .and_then(value_to_u64)
+        .unwrap_or_default();
+    let cached_tokens = totals
+        .get("cacheRead")
+        .and_then(value_to_u64)
+        .unwrap_or_default();
+    let cache_write_tokens = totals
+        .get("cacheWrite")
+        .and_then(value_to_u64)
+        .unwrap_or_default();
+    let total_tokens = totals
+        .get("totalTokens")
+        .and_then(value_to_u64)
+        .unwrap_or(input_tokens + output_tokens + cached_tokens + cache_write_tokens);
+    let total_cost = totals
+        .get("totalCost")
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    let prompt_tokens = input_tokens + cached_tokens + cache_write_tokens;
+
+    let total_messages = messages
+        .get("total")
+        .and_then(value_to_u64)
+        .unwrap_or_default();
+    let user_messages = messages
+        .get("user")
+        .and_then(value_to_u64)
+        .unwrap_or_default();
+    let assistant_messages = messages
+        .get("assistant")
+        .and_then(value_to_u64)
+        .unwrap_or_default();
+    let tool_calls = tools
+        .get("totalCalls")
+        .and_then(value_to_u64)
+        .or_else(|| messages.get("toolCalls").and_then(value_to_u64))
+        .unwrap_or_default();
+    let error_count = messages
+        .get("errors")
+        .and_then(value_to_u64)
+        .unwrap_or_default();
+
+    let sessions = payload
+        .get("sessions")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty_vec);
+    let session_count = sessions.len() as u64;
+    let total_duration_ms = sessions
+        .iter()
+        .filter_map(|session| session.pointer("/usage/durationMs"))
+        .filter_map(value_to_u64)
+        .sum::<u64>();
+    let avg_session_duration = if session_count > 0 {
+        total_duration_ms as f64 / session_count as f64 / 1000.0
+    } else {
+        0.0
+    };
+    let tokens_per_min = if total_duration_ms > 0 {
+        total_tokens as f64 / (total_duration_ms as f64 / 60_000.0)
+    } else {
+        0.0
+    };
+    let avg_tokens_per_msg = if total_messages > 0 {
+        total_tokens as f64 / total_messages as f64
+    } else {
+        0.0
+    };
+    let avg_cost_per_msg = if total_messages > 0 {
+        total_cost / total_messages as f64
+    } else {
+        0.0
+    };
+    let cache_hit_rate = if prompt_tokens > 0 {
+        cached_tokens as f64 / prompt_tokens as f64
+    } else {
+        0.0
+    };
+    let error_rate = if assistant_messages > 0 {
+        error_count as f64 / assistant_messages as f64
+    } else {
+        0.0
+    };
+    let normalized_tools = normalize_gateway_tools(tools);
+    let tools_used = tools
+        .get("uniqueTools")
+        .and_then(value_to_u64)
+        .unwrap_or(normalized_tools.len() as u64);
+
+    Some(LocalUsageSnapshot {
+        messages: total_messages,
+        user_messages,
+        assistant_messages,
+        total_tokens,
+        input_tokens,
+        output_tokens,
+        cached_tokens,
+        prompt_tokens,
+        tokens_per_min,
+        avg_tokens_per_msg,
+        total_cost,
+        avg_cost_per_msg,
+        cache_hit_rate,
+        error_rate,
+        session_count,
+        sessions_in_range: session_count,
+        avg_session_duration,
+        error_count,
+        tool_calls,
+        tools_used,
+        models: normalize_gateway_models(aggregates),
+        providers: normalize_gateway_ranked(aggregates, "byProvider", "provider"),
+        channels: normalize_gateway_ranked(aggregates, "byChannel", "channel"),
+        tools: normalized_tools,
+        agents: normalize_gateway_ranked(aggregates, "byAgent", "agentId"),
+        provider_usage: None,
+        health: None,
+    })
+}
+
+fn normalize_gateway_models(aggregates: &serde_json::Map<String, Value>) -> Vec<ModelUsageEntry> {
+    let mut items = aggregates
+        .get("byModel")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let provider = item
+                .get("provider")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let name = item
+                .get("model")
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let empty_totals = serde_json::Map::new();
+            let totals = item
+                .get("totals")
+                .and_then(Value::as_object)
+                .unwrap_or(&empty_totals);
+
+            Some(ModelUsageEntry {
+                name,
+                provider,
+                tokens: totals
+                    .get("totalTokens")
+                    .and_then(value_to_u64)
+                    .unwrap_or_default(),
+                input_tokens: totals
+                    .get("input")
+                    .and_then(value_to_u64)
+                    .unwrap_or_default(),
+                output_tokens: totals
+                    .get("output")
+                    .and_then(value_to_u64)
+                    .unwrap_or_default(),
+                messages: item.get("count").and_then(value_to_u64).unwrap_or_default(),
+                cost: totals
+                    .get("totalCost")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_default(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    items.sort_by(|left, right| {
+        right
+            .tokens
+            .cmp(&left.tokens)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    items
+}
+
+fn normalize_gateway_ranked(
+    aggregates: &serde_json::Map<String, Value>,
+    key: &str,
+    name_key: &str,
+) -> Vec<RankedUsageEntry> {
+    let mut items = aggregates
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let name = item
+                .get(name_key)
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let empty_totals = serde_json::Map::new();
+            let totals = item
+                .get("totals")
+                .and_then(Value::as_object)
+                .unwrap_or(&empty_totals);
+
+            Some(RankedUsageEntry {
+                name: if key == "byChannel" {
+                    normalize_channel(name)
+                } else {
+                    name.to_string()
+                },
+                tokens: totals
+                    .get("totalTokens")
+                    .and_then(value_to_u64)
+                    .unwrap_or_default(),
+                cost: totals
+                    .get("totalCost")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_default(),
+                messages: item.get("count").and_then(value_to_u64),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    items.sort_by(|left, right| {
+        right
+            .tokens
+            .cmp(&left.tokens)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    items
+}
+
+fn normalize_gateway_tools(tools: &serde_json::Map<String, Value>) -> Vec<ToolUsageEntry> {
+    let mut items = tools
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some(ToolUsageEntry {
+                name: item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                calls: item.get("count").and_then(value_to_u64).unwrap_or_default(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    items.sort_by(|left, right| {
+        right
+            .calls
+            .cmp(&left.calls)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    items
+}
+
+fn local_date_from_timestamp_ms(timestamp_ms: i64) -> Option<NaiveDate> {
+    match Local.timestamp_millis_opt(timestamp_ms) {
+        LocalResult::Single(date_time) => Some(date_time.date_naive()),
+        LocalResult::Ambiguous(early, _) => Some(early.date_naive()),
+        LocalResult::None => None,
+    }
+}
+
+fn local_utc_offset_label() -> String {
+    let offset_seconds = Local::now().offset().local_minus_utc();
+    let sign = if offset_seconds >= 0 { '+' } else { '-' };
+    let abs_seconds = offset_seconds.abs();
+    let hours = abs_seconds / 3600;
+    let minutes = (abs_seconds % 3600) / 60;
+
+    if minutes == 0 {
+        format!("UTC{sign}{hours}")
+    } else {
+        format!("UTC{sign}{hours}:{minutes:02}")
+    }
+}
+
+fn run_openclaw_json(args: &[String], timeout: Duration) -> Option<Value> {
+    let result = run_openclaw_args_timeout(args, timeout);
     let combined = if result.stderr.trim().is_empty() {
         result.stdout.clone()
     } else {
@@ -973,25 +1332,34 @@ fn read_status_snapshot() -> Option<Value> {
         .or_else(|| parse_json_value_from_output(&combined))
 }
 
+fn read_status_snapshot() -> Option<Value> {
+    let args = vec![
+        "status".to_string(),
+        "--json".to_string(),
+        "--usage".to_string(),
+    ];
+    run_openclaw_json(&args, Duration::from_secs(12))
+}
+
 #[cfg(test)]
-    mod tests {
-        use super::*;
-        use chrono::NaiveDate;
-        use std::time::{SystemTime, UNIX_EPOCH};
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-        #[test]
-        fn aggregates_with_openclaw_usage_semantics() {
-            let home = create_test_home("aggregate");
-            let sessions_dir = home.join("agents/main/sessions");
-            fs::create_dir_all(&sessions_dir).unwrap();
+    #[test]
+    fn aggregates_with_openclaw_usage_semantics() {
+        let home = create_test_home("aggregate");
+        let sessions_dir = home.join("agents/main/sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
 
-            let active_path = sessions_dir.join("shared-session.jsonl");
-            let archived_shadow_path =
-                sessions_dir.join("shared-session.jsonl.reset.2026-03-24T00-00-00.000Z");
-            let archived_path =
-                sessions_dir.join("archived-session.jsonl.reset.2026-03-24T00-00-00.000Z");
+        let active_path = sessions_dir.join("shared-session.jsonl");
+        let archived_shadow_path =
+            sessions_dir.join("shared-session.jsonl.reset.2026-03-24T00-00-00.000Z");
+        let archived_path =
+            sessions_dir.join("archived-session.jsonl.reset.2026-03-24T00-00-00.000Z");
 
-            write_file(
+        write_file(
                 &active_path,
                 concat!(
                     "{\"type\":\"session\",\"timestamp\":\"2026-03-24T09:20:44.310Z\"}\n",
@@ -1001,7 +1369,7 @@ fn read_status_snapshot() -> Option<Value> {
                 ),
             );
 
-            write_file(
+        write_file(
                 &archived_shadow_path,
                 concat!(
                     "{\"type\":\"session\",\"timestamp\":\"2026-03-24T08:10:00.000Z\"}\n",
@@ -1010,7 +1378,7 @@ fn read_status_snapshot() -> Option<Value> {
                 ),
             );
 
-            write_file(
+        write_file(
                 &archived_path,
                 concat!(
                     "{\"type\":\"session\",\"timestamp\":\"2026-03-23T06:15:56.367Z\"}\n",
@@ -1019,7 +1387,7 @@ fn read_status_snapshot() -> Option<Value> {
             ),
         );
 
-            write_file(
+        write_file(
                 &sessions_dir.join("sessions.json"),
                 &format!(
                     "{{\"agent:main:main\":{{\"sessionFile\":\"{}\",\"lastChannel\":\"webchat\",\"runtimeMs\":1500}}}}",
@@ -1027,56 +1395,56 @@ fn read_status_snapshot() -> Option<Value> {
                 ),
             );
 
-            let snapshot = aggregate_usage_from_home(&home, &full_range()).expect("snapshot");
+        let snapshot = aggregate_usage_from_home(&home, &full_range()).expect("snapshot");
 
-            assert_eq!(snapshot.messages, 4);
-            assert_eq!(snapshot.user_messages, 2);
-            assert_eq!(snapshot.assistant_messages, 2);
-            assert_eq!(snapshot.session_count, 2);
-            assert_eq!(snapshot.total_tokens, 480);
-            assert_eq!(snapshot.input_tokens, 300);
-            assert_eq!(snapshot.output_tokens, 130);
-            assert_eq!(snapshot.cached_tokens, 45);
-            assert_eq!(snapshot.prompt_tokens, 350);
-            assert_eq!(snapshot.tool_calls, 1);
+        assert_eq!(snapshot.messages, 4);
+        assert_eq!(snapshot.user_messages, 2);
+        assert_eq!(snapshot.assistant_messages, 2);
+        assert_eq!(snapshot.session_count, 2);
+        assert_eq!(snapshot.total_tokens, 480);
+        assert_eq!(snapshot.input_tokens, 300);
+        assert_eq!(snapshot.output_tokens, 130);
+        assert_eq!(snapshot.cached_tokens, 45);
+        assert_eq!(snapshot.prompt_tokens, 350);
+        assert_eq!(snapshot.tool_calls, 1);
         assert_eq!(snapshot.tools_used, 1);
         assert!((snapshot.total_cost - 1.42).abs() < 0.0001);
         assert!((snapshot.cache_hit_rate - (45.0 / 350.0)).abs() < 0.0001);
 
-            assert_eq!(snapshot.models.len(), 2);
-            assert_eq!(snapshot.models[0].name, "glm-5");
-            assert_eq!(snapshot.models[0].tokens, 300);
-            assert_eq!(snapshot.models[1].name, "gpt-5.4");
-            assert_eq!(snapshot.models[1].tokens, 180);
+        assert_eq!(snapshot.models.len(), 2);
+        assert_eq!(snapshot.models[0].name, "glm-5");
+        assert_eq!(snapshot.models[0].tokens, 300);
+        assert_eq!(snapshot.models[1].name, "gpt-5.4");
+        assert_eq!(snapshot.models[1].tokens, 180);
 
-            assert_eq!(snapshot.providers.len(), 1);
-            assert_eq!(snapshot.providers[0].name, "newapi");
-            assert_eq!(snapshot.providers[0].tokens, 480);
+        assert_eq!(snapshot.providers.len(), 1);
+        assert_eq!(snapshot.providers[0].name, "newapi");
+        assert_eq!(snapshot.providers[0].tokens, 480);
 
-            assert_eq!(snapshot.channels.len(), 2);
-            assert_eq!(snapshot.channels[0].name, "openclaw-weixin");
-            assert_eq!(snapshot.channels[0].tokens, 300);
-            assert_eq!(snapshot.channels[1].name, "webchat");
-            assert_eq!(snapshot.channels[1].tokens, 180);
+        assert_eq!(snapshot.channels.len(), 2);
+        assert_eq!(snapshot.channels[0].name, "openclaw-weixin");
+        assert_eq!(snapshot.channels[0].tokens, 300);
+        assert_eq!(snapshot.channels[1].name, "webchat");
+        assert_eq!(snapshot.channels[1].tokens, 180);
 
-            assert_eq!(
-                snapshot.tools,
-                vec![ToolUsageEntry {
-                    name: "read".to_string(),
+        assert_eq!(
+            snapshot.tools,
+            vec![ToolUsageEntry {
+                name: "read".to_string(),
                 calls: 1,
             }]
         );
 
         fs::remove_dir_all(home).unwrap();
-        }
+    }
 
-        #[test]
-        fn filters_by_message_timestamp_inside_selected_range() {
-            let home = create_test_home("range");
-            let sessions_dir = home.join("agents/main/sessions");
-            fs::create_dir_all(&sessions_dir).unwrap();
+    #[test]
+    fn filters_by_message_timestamp_inside_selected_range() {
+        let home = create_test_home("range");
+        let sessions_dir = home.join("agents/main/sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
 
-            write_file(
+        write_file(
                 &sessions_dir.join("first.jsonl"),
                 concat!(
                     "{\"type\":\"session\",\"timestamp\":\"2026-03-24T09:20:44.310Z\"}\n",
@@ -1085,7 +1453,7 @@ fn read_status_snapshot() -> Option<Value> {
                 ),
             );
 
-            write_file(
+        write_file(
                 &sessions_dir.join("second.jsonl"),
                 concat!(
                     "{\"type\":\"session\",\"timestamp\":\"2026-03-23T09:20:44.310Z\"}\n",
@@ -1094,35 +1462,29 @@ fn read_status_snapshot() -> Option<Value> {
                 ),
             );
 
-            write_file(
-                &sessions_dir.join("sessions.json"),
-                "{}",
-            );
+        write_file(&sessions_dir.join("sessions.json"), "{}");
 
-            let snapshot = aggregate_usage_from_home(
-                &home,
-                &single_day_range("2026-03-24"),
-            )
-            .expect("snapshot");
+        let snapshot =
+            aggregate_usage_from_home(&home, &single_day_range("2026-03-24")).expect("snapshot");
 
-            assert_eq!(snapshot.total_tokens, 17);
-            assert_eq!(snapshot.input_tokens, 10);
-            assert_eq!(snapshot.output_tokens, 5);
-            assert_eq!(snapshot.cached_tokens, 2);
-            assert_eq!(snapshot.messages, 2);
-            assert_eq!(snapshot.session_count, 2);
-            assert_eq!(snapshot.channels[0].name, "webchat");
+        assert_eq!(snapshot.total_tokens, 17);
+        assert_eq!(snapshot.input_tokens, 10);
+        assert_eq!(snapshot.output_tokens, 5);
+        assert_eq!(snapshot.cached_tokens, 2);
+        assert_eq!(snapshot.messages, 2);
+        assert_eq!(snapshot.session_count, 2);
+        assert_eq!(snapshot.channels[0].name, "webchat");
 
-            fs::remove_dir_all(home).unwrap();
-        }
+        fs::remove_dir_all(home).unwrap();
+    }
 
-        #[test]
-        fn falls_back_to_orphan_transcripts_without_sessions_index() {
-            let home = create_test_home("orphan");
-            let sessions_dir = home.join("agents/main/sessions");
-            fs::create_dir_all(&sessions_dir).unwrap();
+    #[test]
+    fn falls_back_to_orphan_transcripts_without_sessions_index() {
+        let home = create_test_home("orphan");
+        let sessions_dir = home.join("agents/main/sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
 
-            write_file(
+        write_file(
                 &sessions_dir.join("orphan.jsonl"),
                 concat!(
                     "{\"type\":\"session\",\"timestamp\":\"2026-03-24T09:20:44.310Z\"}\n",
@@ -1131,173 +1493,173 @@ fn read_status_snapshot() -> Option<Value> {
                 ),
             );
 
-            let snapshot = aggregate_usage_from_home(&home, &full_range()).expect("snapshot");
-            assert_eq!(snapshot.total_tokens, 15);
-            assert_eq!(snapshot.session_count, 1);
-            assert_eq!(snapshot.channels[0].name, "webchat");
-            assert!(snapshot
-                .health
-                .as_ref()
-                .is_some_and(|health| health.partial));
+        let snapshot = aggregate_usage_from_home(&home, &full_range()).expect("snapshot");
+        assert_eq!(snapshot.total_tokens, 15);
+        assert_eq!(snapshot.session_count, 1);
+        assert_eq!(snapshot.channels[0].name, "webchat");
+        assert!(snapshot
+            .health
+            .as_ref()
+            .is_some_and(|health| health.partial));
 
-            fs::remove_dir_all(home).unwrap();
-        }
+        fs::remove_dir_all(home).unwrap();
+    }
 
-        #[test]
-        fn normalizes_gateway_sessions_usage_payload() {
-            let payload = serde_json::json!({
-                "sessions": [
+    #[test]
+    fn normalizes_gateway_sessions_usage_payload() {
+        let payload = serde_json::json!({
+            "sessions": [
+                {
+                    "key": "agent:main:main",
+                    "agentId": "main",
+                    "channel": "webchat",
+                    "usage": {
+                        "durationMs": 30_000
+                    }
+                },
+                {
+                    "key": "agent:main:wechat",
+                    "agentId": "main",
+                    "channel": "openclaw-weixin",
+                    "usage": {
+                        "durationMs": 90_000
+                    }
+                }
+            ],
+            "totals": {
+                "input": 1000,
+                "output": 400,
+                "cacheRead": 600,
+                "cacheWrite": 0,
+                "totalTokens": 2000,
+                "totalCost": 1.25
+            },
+            "aggregates": {
+                "messages": {
+                    "total": 10,
+                    "user": 4,
+                    "assistant": 6,
+                    "toolCalls": 3,
+                    "errors": 1
+                },
+                "tools": {
+                    "totalCalls": 3,
+                    "uniqueTools": 2,
+                    "tools": [
+                        { "name": "read", "count": 2 },
+                        { "name": "exec", "count": 1 }
+                    ]
+                },
+                "byModel": [
                     {
-                        "key": "agent:main:main",
-                        "agentId": "main",
-                        "channel": "webchat",
-                        "usage": {
-                            "durationMs": 30_000
-                        }
-                    },
-                    {
-                        "key": "agent:main:wechat",
-                        "agentId": "main",
-                        "channel": "openclaw-weixin",
-                        "usage": {
-                            "durationMs": 90_000
+                        "provider": "newapi",
+                        "model": "glm-5",
+                        "count": 6,
+                        "totals": {
+                            "input": 1000,
+                            "output": 400,
+                            "cacheRead": 600,
+                            "cacheWrite": 0,
+                            "totalTokens": 2000,
+                            "totalCost": 1.25
                         }
                     }
                 ],
-                "totals": {
-                    "input": 1000,
-                    "output": 400,
-                    "cacheRead": 600,
-                    "cacheWrite": 0,
-                    "totalTokens": 2000,
-                    "totalCost": 1.25
-                },
-                "aggregates": {
-                    "messages": {
-                        "total": 10,
-                        "user": 4,
-                        "assistant": 6,
-                        "toolCalls": 3,
-                        "errors": 1
+                "byProvider": [
+                    {
+                        "provider": "newapi",
+                        "count": 6,
+                        "totals": {
+                            "totalTokens": 2000,
+                            "totalCost": 1.25
+                        }
+                    }
+                ],
+                "byAgent": [
+                    {
+                        "agentId": "main",
+                        "totals": {
+                            "totalTokens": 2000,
+                            "totalCost": 1.25
+                        }
+                    }
+                ],
+                "byChannel": [
+                    {
+                        "channel": "webchat",
+                        "totals": {
+                            "totalTokens": 1500,
+                            "totalCost": 1.0
+                        }
                     },
-                    "tools": {
-                        "totalCalls": 3,
-                        "uniqueTools": 2,
-                        "tools": [
-                            { "name": "read", "count": 2 },
-                            { "name": "exec", "count": 1 }
-                        ]
-                    },
-                    "byModel": [
-                        {
-                            "provider": "newapi",
-                            "model": "glm-5",
-                            "count": 6,
-                            "totals": {
-                                "input": 1000,
-                                "output": 400,
-                                "cacheRead": 600,
-                                "cacheWrite": 0,
-                                "totalTokens": 2000,
-                                "totalCost": 1.25
-                            }
+                    {
+                        "channel": "openclaw-weixin",
+                        "totals": {
+                            "totalTokens": 500,
+                            "totalCost": 0.25
                         }
-                    ],
-                    "byProvider": [
-                        {
-                            "provider": "newapi",
-                            "count": 6,
-                            "totals": {
-                                "totalTokens": 2000,
-                                "totalCost": 1.25
-                            }
-                        }
-                    ],
-                    "byAgent": [
-                        {
-                            "agentId": "main",
-                            "totals": {
-                                "totalTokens": 2000,
-                                "totalCost": 1.25
-                            }
-                        }
-                    ],
-                    "byChannel": [
-                        {
-                            "channel": "webchat",
-                            "totals": {
-                                "totalTokens": 1500,
-                                "totalCost": 1.0
-                            }
-                        },
-                        {
-                            "channel": "openclaw-weixin",
-                            "totals": {
-                                "totalTokens": 500,
-                                "totalCost": 0.25
-                            }
-                        }
-                    ]
-                }
-            });
+                    }
+                ]
+            }
+        });
 
-            let snapshot = normalize_gateway_sessions_usage_snapshot(&payload).expect("snapshot");
+        let snapshot = normalize_gateway_sessions_usage_snapshot(&payload).expect("snapshot");
 
-            assert_eq!(snapshot.messages, 10);
-            assert_eq!(snapshot.user_messages, 4);
-            assert_eq!(snapshot.assistant_messages, 6);
-            assert_eq!(snapshot.total_tokens, 2000);
-            assert_eq!(snapshot.input_tokens, 1000);
-            assert_eq!(snapshot.output_tokens, 400);
-            assert_eq!(snapshot.cached_tokens, 600);
-            assert_eq!(snapshot.prompt_tokens, 1600);
-            assert_eq!(snapshot.session_count, 2);
-            assert_eq!(snapshot.sessions_in_range, 2);
-            assert_eq!(snapshot.tool_calls, 3);
-            assert_eq!(snapshot.tools_used, 2);
-            assert_eq!(snapshot.error_count, 1);
-            assert!((snapshot.total_cost - 1.25).abs() < 0.0001);
-            assert!((snapshot.cache_hit_rate - 0.375).abs() < 0.0001);
-            assert!((snapshot.error_rate - (1.0 / 6.0)).abs() < 0.0001);
-            assert!((snapshot.avg_tokens_per_msg - 200.0).abs() < 0.0001);
-            assert!((snapshot.tokens_per_min - 1000.0).abs() < 0.0001);
-            assert!((snapshot.avg_session_duration - 60.0).abs() < 0.0001);
-            assert_eq!(snapshot.models[0].name, "glm-5");
-            assert_eq!(snapshot.models[0].tokens, 2000);
-            assert_eq!(snapshot.providers[0].name, "newapi");
-            assert_eq!(snapshot.channels[0].name, "webchat");
-            assert_eq!(snapshot.tools[0].name, "read");
-            assert_eq!(snapshot.tools[0].calls, 2);
-            assert_eq!(snapshot.agents[0].name, "main");
-        }
+        assert_eq!(snapshot.messages, 10);
+        assert_eq!(snapshot.user_messages, 4);
+        assert_eq!(snapshot.assistant_messages, 6);
+        assert_eq!(snapshot.total_tokens, 2000);
+        assert_eq!(snapshot.input_tokens, 1000);
+        assert_eq!(snapshot.output_tokens, 400);
+        assert_eq!(snapshot.cached_tokens, 600);
+        assert_eq!(snapshot.prompt_tokens, 1600);
+        assert_eq!(snapshot.session_count, 2);
+        assert_eq!(snapshot.sessions_in_range, 2);
+        assert_eq!(snapshot.tool_calls, 3);
+        assert_eq!(snapshot.tools_used, 2);
+        assert_eq!(snapshot.error_count, 1);
+        assert!((snapshot.total_cost - 1.25).abs() < 0.0001);
+        assert!((snapshot.cache_hit_rate - 0.375).abs() < 0.0001);
+        assert!((snapshot.error_rate - (1.0 / 6.0)).abs() < 0.0001);
+        assert!((snapshot.avg_tokens_per_msg - 200.0).abs() < 0.0001);
+        assert!((snapshot.tokens_per_min - 1000.0).abs() < 0.0001);
+        assert!((snapshot.avg_session_duration - 60.0).abs() < 0.0001);
+        assert_eq!(snapshot.models[0].name, "glm-5");
+        assert_eq!(snapshot.models[0].tokens, 2000);
+        assert_eq!(snapshot.providers[0].name, "newapi");
+        assert_eq!(snapshot.channels[0].name, "webchat");
+        assert_eq!(snapshot.tools[0].name, "read");
+        assert_eq!(snapshot.tools[0].calls, 2);
+        assert_eq!(snapshot.agents[0].name, "main");
+    }
 
-        fn create_test_home(label: &str) -> PathBuf {
-            let unique = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+    fn create_test_home(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::temp_dir().join(format!("clawhelp-usage-{label}-{unique}"))
     }
 
-        fn write_file(path: &Path, content: &str) {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).unwrap();
-            }
-            fs::write(path, content).unwrap();
+    fn write_file(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
         }
+        fs::write(path, content).unwrap();
+    }
 
-        fn full_range() -> UsageDateRange {
-            UsageDateRange {
-                start_ms: 0,
-                end_ms: i64::MAX,
-            }
-        }
-
-        fn single_day_range(date: &str) -> UsageDateRange {
-            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap();
-            UsageDateRange {
-                start_ms: local_day_start_ms(date).unwrap(),
-                end_ms: local_day_end_ms(date).unwrap(),
-            }
+    fn full_range() -> UsageDateRange {
+        UsageDateRange {
+            start_ms: 0,
+            end_ms: i64::MAX,
         }
     }
+
+    fn single_day_range(date: &str) -> UsageDateRange {
+        let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap();
+        UsageDateRange {
+            start_ms: local_day_start_ms(date).unwrap(),
+            end_ms: local_day_end_ms(date).unwrap(),
+        }
+    }
+}
