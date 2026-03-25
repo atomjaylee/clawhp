@@ -1143,6 +1143,134 @@ fn read_status_snapshot() -> Option<Value> {
             fs::remove_dir_all(home).unwrap();
         }
 
+        #[test]
+        fn normalizes_gateway_sessions_usage_payload() {
+            let payload = serde_json::json!({
+                "sessions": [
+                    {
+                        "key": "agent:main:main",
+                        "agentId": "main",
+                        "channel": "webchat",
+                        "usage": {
+                            "durationMs": 30_000
+                        }
+                    },
+                    {
+                        "key": "agent:main:wechat",
+                        "agentId": "main",
+                        "channel": "openclaw-weixin",
+                        "usage": {
+                            "durationMs": 90_000
+                        }
+                    }
+                ],
+                "totals": {
+                    "input": 1000,
+                    "output": 400,
+                    "cacheRead": 600,
+                    "cacheWrite": 0,
+                    "totalTokens": 2000,
+                    "totalCost": 1.25
+                },
+                "aggregates": {
+                    "messages": {
+                        "total": 10,
+                        "user": 4,
+                        "assistant": 6,
+                        "toolCalls": 3,
+                        "errors": 1
+                    },
+                    "tools": {
+                        "totalCalls": 3,
+                        "uniqueTools": 2,
+                        "tools": [
+                            { "name": "read", "count": 2 },
+                            { "name": "exec", "count": 1 }
+                        ]
+                    },
+                    "byModel": [
+                        {
+                            "provider": "newapi",
+                            "model": "glm-5",
+                            "count": 6,
+                            "totals": {
+                                "input": 1000,
+                                "output": 400,
+                                "cacheRead": 600,
+                                "cacheWrite": 0,
+                                "totalTokens": 2000,
+                                "totalCost": 1.25
+                            }
+                        }
+                    ],
+                    "byProvider": [
+                        {
+                            "provider": "newapi",
+                            "count": 6,
+                            "totals": {
+                                "totalTokens": 2000,
+                                "totalCost": 1.25
+                            }
+                        }
+                    ],
+                    "byAgent": [
+                        {
+                            "agentId": "main",
+                            "totals": {
+                                "totalTokens": 2000,
+                                "totalCost": 1.25
+                            }
+                        }
+                    ],
+                    "byChannel": [
+                        {
+                            "channel": "webchat",
+                            "totals": {
+                                "totalTokens": 1500,
+                                "totalCost": 1.0
+                            }
+                        },
+                        {
+                            "channel": "openclaw-weixin",
+                            "totals": {
+                                "totalTokens": 500,
+                                "totalCost": 0.25
+                            }
+                        }
+                    ]
+                }
+            });
+
+            let snapshot = normalize_gateway_sessions_usage_snapshot(&payload).expect("snapshot");
+
+            assert_eq!(snapshot.messages, 10);
+            assert_eq!(snapshot.user_messages, 4);
+            assert_eq!(snapshot.assistant_messages, 6);
+            assert_eq!(snapshot.total_tokens, 2000);
+            assert_eq!(snapshot.input_tokens, 1000);
+            assert_eq!(snapshot.output_tokens, 400);
+            assert_eq!(snapshot.cached_tokens, 600);
+            assert_eq!(snapshot.prompt_tokens, 1600);
+            assert_eq!(snapshot.session_count, 2);
+            assert_eq!(snapshot.sessions_in_range, 2);
+            assert_eq!(snapshot.tool_calls, 3);
+            assert_eq!(snapshot.tools_used, 2);
+            assert_eq!(snapshot.error_count, 1);
+            assert!((snapshot.total_cost - 1.25).abs() < 0.0001);
+            assert!((snapshot.cache_hit_rate - 0.375).abs() < 0.0001);
+            assert!((snapshot.error_rate - (1.0 / 6.0)).abs() < 0.0001);
+            assert!((snapshot.avg_tokens_per_msg - 200.0).abs() < 0.0001);
+            assert!((snapshot.tokens_per_min - 1000.0).abs() < 0.0001);
+            assert!((snapshot.avg_session_duration - 60.0).abs() < 0.0001);
+            assert_eq!(snapshot.models[0].name, "glm-5");
+            assert_eq!(snapshot.models[0].tokens, 2000);
+            assert_eq!(snapshot.providers[0].name, "newapi");
+            assert_eq!(snapshot.channels[0].name, "webchat");
+            assert_eq!(snapshot.tools[0].name, "read");
+            assert_eq!(snapshot.tools[0].calls, 2);
+            assert_eq!(snapshot.agents[0].name, "main");
+        }
+
         fn create_test_home(label: &str) -> PathBuf {
             let unique = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
