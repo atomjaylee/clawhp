@@ -1,9 +1,10 @@
 use crate::config::{parse_json_value_from_output, run_openclaw_args_timeout};
 use crate::types::CommandResult;
 use crate::util::path::get_openclaw_home;
+use chrono::{Datelike, Duration as ChronoDuration, Local, LocalResult, NaiveDate, TimeZone};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -14,7 +15,20 @@ struct TranscriptDescriptor {
     path: PathBuf,
     agent_id: String,
     channel: Option<String>,
-    runtime_ms: Option<u64>,
+    updated_at_ms: i64,
+    is_primary: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionStoreMetadata {
+    channel: Option<String>,
+    updated_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UsageDateRange {
+    start_ms: i64,
+    end_ms: i64,
 }
 
 #[derive(Debug, Default)]
@@ -125,9 +139,20 @@ struct UsageAccumulator {
     tools: HashMap<String, ToolUsageEntry>,
 }
 
+#[derive(Debug, Default)]
+struct SessionScanState {
+    first_activity_ms: Option<i64>,
+    last_activity_ms: Option<i64>,
+    last_user_timestamp_ms: Option<i64>,
+    channel: Option<String>,
+}
+
 #[tauri::command]
-pub(crate) async fn get_usage_snapshot() -> CommandResult {
-    tokio::task::spawn_blocking(build_usage_snapshot)
+pub(crate) async fn get_usage_snapshot(
+    start_date: Option<String>,
+    end_date: Option<String>,
+) -> CommandResult {
+    tokio::task::spawn_blocking(move || build_usage_snapshot(start_date, end_date))
         .await
         .unwrap_or_else(|e| CommandResult {
             success: false,
@@ -137,11 +162,22 @@ pub(crate) async fn get_usage_snapshot() -> CommandResult {
         })
 }
 
-fn build_usage_snapshot() -> CommandResult {
+fn build_usage_snapshot(start_date: Option<String>, end_date: Option<String>) -> CommandResult {
+    let range = match parse_usage_date_range(start_date.as_deref(), end_date.as_deref()) {
+        Ok(range) => range,
+        Err(error) => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: error,
+                code: Some(1),
+            };
+        }
+    };
     let home = PathBuf::from(get_openclaw_home());
     let status_snapshot = read_status_snapshot();
 
-    if let Some(mut snapshot) = aggregate_usage_from_home(&home) {
+    if let Some(mut snapshot) = aggregate_usage_from_home(&home, &range) {
         if let Some(provider_usage) = status_snapshot
             .as_ref()
             .and_then(|status| status.get("usage"))
@@ -189,8 +225,8 @@ fn build_usage_snapshot() -> CommandResult {
     }
 }
 
-fn aggregate_usage_from_home(home: &Path) -> Option<LocalUsageSnapshot> {
-    let discovery = discover_transcripts(home);
+fn aggregate_usage_from_home(home: &Path, range: &UsageDateRange) -> Option<LocalUsageSnapshot> {
+    let mut discovery = discover_transcripts(home, range);
     if discovery.descriptors.is_empty() {
         return None;
     }
@@ -199,8 +235,15 @@ fn aggregate_usage_from_home(home: &Path) -> Option<LocalUsageSnapshot> {
     let mut indexed_files = 0usize;
 
     for descriptor in &discovery.descriptors {
-        if accumulate_transcript(&mut acc, descriptor) {
-            indexed_files += 1;
+        match accumulate_transcript(&mut acc, descriptor, range) {
+            Ok(duration_ms) => {
+                indexed_files += 1;
+                acc.session_count += 1;
+                if let Some(duration_ms) = duration_ms {
+                    acc.durations_ms.push(duration_ms);
+                }
+            }
+            Err(error) => discovery.warnings.push(error),
         }
     }
 
@@ -282,7 +325,7 @@ fn aggregate_usage_from_home(home: &Path) -> Option<LocalUsageSnapshot> {
     })
 }
 
-fn discover_transcripts(home: &Path) -> TranscriptDiscovery {
+fn discover_transcripts(home: &Path, range: &UsageDateRange) -> TranscriptDiscovery {
     let mut discovery = TranscriptDiscovery::default();
     let agents_dir = home.join("agents");
     let Ok(agent_entries) = fs::read_dir(&agents_dir) else {
@@ -304,7 +347,7 @@ fn discover_transcripts(home: &Path) -> TranscriptDiscovery {
             continue;
         }
 
-        let mut seen_paths = HashSet::new();
+        let mut metadata_by_session = HashMap::new();
         let sessions_index = sessions_dir.join("sessions.json");
         if sessions_index.is_file() {
             match fs::read_to_string(&sessions_index)
@@ -317,22 +360,16 @@ fn discover_transcripts(home: &Path) -> TranscriptDiscovery {
                             continue;
                         };
                         let path = PathBuf::from(path_str);
-                        if !path.is_file() {
-                            continue;
+                        if let Some(session_id) = parse_session_id_from_path(&path) {
+                            metadata_by_session.insert(
+                                session_scope_key(&agent_id, &session_id),
+                                SessionStoreMetadata {
+                                    channel: infer_channel_from_session_entry(entry),
+                                    updated_at_ms: value_to_i64(entry.get("updatedAt").unwrap_or(&Value::Null)),
+                                },
+                            );
                         }
-
-                        let key = normalize_path_key(&path);
-                        if !seen_paths.insert(key) {
-                            continue;
-                        }
-
                         discovery.live_sessions += 1;
-                        discovery.descriptors.push(TranscriptDescriptor {
-                            path,
-                            agent_id: agent_id.clone(),
-                            channel: infer_channel_from_session_entry(entry),
-                            runtime_ms: entry.get("runtimeMs").and_then(value_to_u64),
-                        });
                     }
                 }
                 _ => discovery
@@ -352,6 +389,7 @@ fn discover_transcripts(home: &Path) -> TranscriptDiscovery {
             continue;
         };
 
+        let mut discovered_by_session = HashMap::<String, TranscriptDescriptor>::new();
         for file in files.flatten() {
             let path = file.path();
             if !path.is_file() {
@@ -359,41 +397,73 @@ fn discover_transcripts(home: &Path) -> TranscriptDiscovery {
             }
 
             let name = file.file_name().to_string_lossy().to_string();
-            let archived = name.contains(".jsonl.reset.");
-            let is_transcript = name.ends_with(".jsonl") || archived;
-            if !is_transcript {
+            let Some(session_id) = parse_session_id_from_file_name(&name) else {
                 continue;
-            }
-
-            let key = normalize_path_key(&path);
-            if !seen_paths.insert(key) {
-                continue;
-            }
-
+            };
+            let is_primary = is_primary_transcript_file_name(&name);
+            let archived = !is_primary;
             if archived {
                 discovery.archived_files += 1;
             }
 
-            discovery.descriptors.push(TranscriptDescriptor {
+            let updated_at_ms = file
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as i64)
+                .unwrap_or(0);
+
+            if updated_at_ms < range.start_ms {
+                continue;
+            }
+
+            let meta_key = session_scope_key(&agent_id, &session_id);
+            let metadata = metadata_by_session.get(&meta_key);
+            let candidate = TranscriptDescriptor {
                 path,
                 agent_id: agent_id.clone(),
-                channel: None,
-                runtime_ms: None,
-            });
+                channel: metadata.and_then(|item| item.channel.clone()),
+                updated_at_ms: metadata
+                    .and_then(|item| item.updated_at_ms)
+                    .unwrap_or(updated_at_ms),
+                is_primary,
+            };
+
+            match discovered_by_session.get(&session_id) {
+                Some(existing)
+                    if !should_replace_transcript_descriptor(existing, &candidate) => {}
+                _ => {
+                    discovered_by_session.insert(session_id, candidate);
+                }
+            }
         }
+
+        discovery
+            .descriptors
+            .extend(discovered_by_session.into_values());
     }
 
     discovery
+        .descriptors
+        .sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
+    discovery
 }
 
-fn accumulate_transcript(acc: &mut UsageAccumulator, descriptor: &TranscriptDescriptor) -> bool {
+fn accumulate_transcript(
+    acc: &mut UsageAccumulator,
+    descriptor: &TranscriptDescriptor,
+    range: &UsageDateRange,
+) -> Result<Option<u64>, String> {
     let Ok(file) = File::open(&descriptor.path) else {
-        return false;
+        return Err(format!("无法读取会话文件: {}", descriptor.path.display()));
     };
 
     let reader = BufReader::new(file);
-    let mut had_activity = false;
-    let mut channel = descriptor.channel.clone();
+    let mut state = SessionScanState {
+        channel: descriptor.channel.clone(),
+        ..SessionScanState::default()
+    };
     let mut current_provider: Option<String> = None;
     let mut current_model: Option<String> = None;
 
@@ -436,13 +506,6 @@ fn accumulate_transcript(acc: &mut UsageAccumulator, descriptor: &TranscriptDesc
                             .map(str::to_string)
                             .or_else(|| current_model.clone());
                     }
-                } else if record
-                    .get("customType")
-                    .and_then(Value::as_str)
-                    .is_some_and(|kind| kind.contains("prompt-error"))
-                {
-                    acc.error_count += 1;
-                    had_activity = true;
                 }
             }
             Some("message") => {
@@ -450,18 +513,41 @@ fn accumulate_transcript(acc: &mut UsageAccumulator, descriptor: &TranscriptDesc
                     continue;
                 };
                 let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+                let timestamp_ms = parse_entry_timestamp_ms(&record, message);
+                if timestamp_ms.is_some_and(|timestamp| timestamp < range.start_ms || timestamp > range.end_ms) {
+                    continue;
+                }
                 match role {
                     "user" => {
                         acc.user_messages += 1;
-                        had_activity = true;
-                        if channel.is_none() {
+                        if let Some(timestamp_ms) = timestamp_ms {
+                            state.first_activity_ms = Some(match state.first_activity_ms {
+                                Some(current) => current.min(timestamp_ms),
+                                None => timestamp_ms,
+                            });
+                            state.last_activity_ms = Some(match state.last_activity_ms {
+                                Some(current) => current.max(timestamp_ms),
+                                None => timestamp_ms,
+                            });
+                            state.last_user_timestamp_ms = Some(timestamp_ms);
+                        }
+                        if state.channel.is_none() {
                             let text = extract_text_blob(message.get("content"));
-                            channel = infer_channel_from_text(&text);
+                            state.channel = infer_channel_from_text(&text);
                         }
                     }
                     "assistant" => {
                         acc.assistant_messages += 1;
-                        had_activity = true;
+                        if let Some(timestamp_ms) = timestamp_ms {
+                            state.first_activity_ms = Some(match state.first_activity_ms {
+                                Some(current) => current.min(timestamp_ms),
+                                None => timestamp_ms,
+                            });
+                            state.last_activity_ms = Some(match state.last_activity_ms {
+                                Some(current) => current.max(timestamp_ms),
+                                None => timestamp_ms,
+                            });
+                        }
 
                         if let Some(content) = message.get("content") {
                             observe_tool_calls(acc, content);
@@ -479,10 +565,20 @@ fn accumulate_transcript(acc: &mut UsageAccumulator, descriptor: &TranscriptDesc
                             .map(str::to_string)
                             .or_else(|| current_model.clone())
                             .unwrap_or_else(|| "unknown".to_string());
-                        let channel_name = channel.clone().unwrap_or_else(|| "unknown".to_string());
+                        let channel_name = state
+                            .channel
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string());
 
                         if let Some(usage) = message.get("usage") {
-                            observe_usage(acc, &provider, &model, &channel_name, &descriptor.agent_id, usage);
+                            observe_usage(
+                                acc,
+                                &provider,
+                                &model,
+                                &channel_name,
+                                &descriptor.agent_id,
+                                usage,
+                            );
                         }
 
                         let stop_reason = message.get("stopReason").and_then(Value::as_str).unwrap_or("");
@@ -490,14 +586,8 @@ fn accumulate_transcript(acc: &mut UsageAccumulator, descriptor: &TranscriptDesc
                             .get("errorMessage")
                             .and_then(Value::as_str)
                             .is_some_and(|value| !value.trim().is_empty())
-                            || stop_reason == "aborted";
+                            || matches!(stop_reason, "error" | "aborted" | "timeout");
                         if has_error {
-                            acc.error_count += 1;
-                        }
-                    }
-                    "toolResult" => {
-                        had_activity = true;
-                        if message.get("isError").and_then(Value::as_bool).unwrap_or(false) {
                             acc.error_count += 1;
                         }
                     }
@@ -508,14 +598,12 @@ fn accumulate_transcript(acc: &mut UsageAccumulator, descriptor: &TranscriptDesc
         }
     }
 
-    if had_activity {
-        acc.session_count += 1;
-        if let Some(runtime_ms) = descriptor.runtime_ms {
-            acc.durations_ms.push(runtime_ms);
-        }
-    }
+    let duration_ms = match (state.first_activity_ms, state.last_activity_ms) {
+        (Some(start_ms), Some(end_ms)) if end_ms >= start_ms => Some((end_ms - start_ms) as u64),
+        _ => None,
+    };
 
-    had_activity
+    Ok(duration_ms)
 }
 
 fn observe_tool_calls(acc: &mut UsageAccumulator, content: &Value) {
@@ -553,11 +641,14 @@ fn observe_usage(
     let output = usage.get("output").and_then(value_to_u64).unwrap_or(0);
     let cache_read = usage.get("cacheRead").and_then(value_to_u64).unwrap_or(0);
     let cache_write = usage.get("cacheWrite").and_then(value_to_u64).unwrap_or(0);
-    let visible_tokens = input + output;
+    let total_tokens = usage
+        .get("totalTokens")
+        .and_then(value_to_u64)
+        .unwrap_or(input + output + cache_read + cache_write);
     let prompt_tokens = input + cache_read + cache_write;
     let cost = extract_total_cost(usage);
 
-    acc.total_tokens += visible_tokens;
+    acc.total_tokens += total_tokens;
     acc.input_tokens += input;
     acc.output_tokens += output;
     acc.cached_tokens += cache_read;
@@ -574,15 +665,15 @@ fn observe_usage(
         messages: 0,
         cost: 0.0,
     });
-    model_entry.tokens += visible_tokens;
+    model_entry.tokens += total_tokens;
     model_entry.input_tokens += input;
     model_entry.output_tokens += output;
     model_entry.messages += 1;
     model_entry.cost += cost;
 
-    update_ranked_entry(&mut acc.providers, provider, visible_tokens, cost);
-    update_ranked_entry(&mut acc.channels, channel, visible_tokens, cost);
-    update_ranked_entry(&mut acc.agents, agent_id, visible_tokens, cost);
+    update_ranked_entry(&mut acc.providers, provider, total_tokens, cost);
+    update_ranked_entry(&mut acc.channels, channel, total_tokens, cost);
+    update_ranked_entry(&mut acc.agents, agent_id, total_tokens, cost);
 }
 
 fn update_ranked_entry(
@@ -750,8 +841,106 @@ fn extract_text_blob(content: Option<&Value>) -> String {
         .unwrap_or_default()
 }
 
-fn normalize_path_key(path: &Path) -> String {
-    path.to_string_lossy().to_string()
+fn session_scope_key(agent_id: &str, session_id: &str) -> String {
+    format!("{agent_id}::{session_id}")
+}
+
+fn parse_session_id_from_path(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(parse_session_id_from_file_name)
+}
+
+fn parse_session_id_from_file_name(name: &str) -> Option<String> {
+    name.strip_suffix(".jsonl")
+        .or_else(|| name.split_once(".jsonl.reset.").map(|(session_id, _)| session_id))
+        .or_else(|| name.split_once(".jsonl.deleted.").map(|(session_id, _)| session_id))
+        .map(str::to_string)
+}
+
+fn is_primary_transcript_file_name(name: &str) -> bool {
+    name.ends_with(".jsonl")
+}
+
+fn should_replace_transcript_descriptor(
+    current: &TranscriptDescriptor,
+    candidate: &TranscriptDescriptor,
+) -> bool {
+    (candidate.is_primary && !current.is_primary)
+        || (candidate.is_primary == current.is_primary
+            && candidate.updated_at_ms >= current.updated_at_ms)
+}
+
+fn parse_usage_date_range(
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> Result<UsageDateRange, String> {
+    let today = Local::now().date_naive();
+    let (start_date, end_date) = match (start_date, end_date) {
+        (Some(start), Some(end)) => (parse_usage_date(start)?, parse_usage_date(end)?),
+        (Some(start), None) => {
+            let date = parse_usage_date(start)?;
+            (date, date)
+        }
+        (None, Some(end)) => {
+            let date = parse_usage_date(end)?;
+            (date, date)
+        }
+        (None, None) => (today - ChronoDuration::days(29), today),
+    };
+
+    if start_date > end_date {
+        return Err("开始日期不能晚于结束日期".to_string());
+    }
+
+    let start_ms = local_day_start_ms(start_date)?;
+    let end_ms = local_day_end_ms(end_date)?;
+    Ok(UsageDateRange {
+        start_ms,
+        end_ms,
+    })
+}
+
+fn parse_usage_date(raw: &str) -> Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")
+        .map_err(|_| format!("无效日期: {raw}，期望格式 YYYY-MM-DD"))
+}
+
+fn local_day_start_ms(date: NaiveDate) -> Result<i64, String> {
+    match Local.with_ymd_and_hms(date.year(), date.month(), date.day(), 0, 0, 0) {
+        LocalResult::Single(date_time) => Ok(date_time.timestamp_millis()),
+        LocalResult::Ambiguous(early, _) => Ok(early.timestamp_millis()),
+        LocalResult::None => Err(format!("无法解析本地日期边界: {date}")),
+    }
+}
+
+fn local_day_end_ms(date: NaiveDate) -> Result<i64, String> {
+    let next_day = date
+        .succ_opt()
+        .ok_or_else(|| format!("无法计算结束日期: {date}"))?;
+    Ok(local_day_start_ms(next_day)? - 1)
+}
+
+fn parse_entry_timestamp_ms(record: &Value, message: &Value) -> Option<i64> {
+    parse_timestamp_value(record.get("timestamp"))
+        .or_else(|| parse_timestamp_value(message.get("timestamp")))
+}
+
+fn parse_timestamp_value(value: Option<&Value>) -> Option<i64> {
+    let value = value?;
+    if let Some(raw) = value.as_str() {
+        return chrono::DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|date_time| date_time.timestamp_millis());
+    }
+    value_to_i64(value)
+}
+
+fn value_to_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .or_else(|| value.as_f64().map(|number| number.round() as i64))
 }
 
 fn value_to_u64(value: &Value) -> Option<u64> {
@@ -785,127 +974,202 @@ fn read_status_snapshot() -> Option<Value> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    mod tests {
+        use super::*;
+        use chrono::NaiveDate;
+        use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn aggregates_live_and_archived_transcripts_from_local_logs() {
-        let home = create_test_home("aggregate");
-        let sessions_dir = home.join("agents/main/sessions");
-        fs::create_dir_all(&sessions_dir).unwrap();
+        #[test]
+        fn aggregates_with_openclaw_usage_semantics() {
+            let home = create_test_home("aggregate");
+            let sessions_dir = home.join("agents/main/sessions");
+            fs::create_dir_all(&sessions_dir).unwrap();
 
-        let active_path = sessions_dir.join("live-session.jsonl");
-        let archived_path = sessions_dir.join("archived-session.jsonl.reset.2026-03-24T00-00-00.000Z");
+            let active_path = sessions_dir.join("shared-session.jsonl");
+            let archived_shadow_path =
+                sessions_dir.join("shared-session.jsonl.reset.2026-03-24T00-00-00.000Z");
+            let archived_path =
+                sessions_dir.join("archived-session.jsonl.reset.2026-03-24T00-00-00.000Z");
 
-        write_file(
-            &active_path,
-            concat!(
-                "{\"type\":\"session\",\"timestamp\":\"2026-03-24T09:20:44.310Z\"}\n",
-                "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Sender (untrusted metadata):\\n```json\\n{\\n  \\\"label\\\": \\\"openclaw-control-ui\\\",\\n  \\\"id\\\": \\\"openclaw-control-ui\\\"\\n}\\n```\"}]}}\n",
-                "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"tool-1\",\"name\":\"read\",\"arguments\":{}},{\"type\":\"text\",\"text\":\"done\"}],\"provider\":\"newapi\",\"model\":\"gpt-5.4\",\"usage\":{\"input\":100,\"output\":50,\"cacheRead\":25,\"cacheWrite\":5,\"totalTokens\":180,\"cost\":{\"total\":0.42}},\"stopReason\":\"stop\"}}\n"
+            write_file(
+                &active_path,
+                concat!(
+                    "{\"type\":\"session\",\"timestamp\":\"2026-03-24T09:20:44.310Z\"}\n",
+                    "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Sender (untrusted metadata):\\n```json\\n{\\n  \\\"label\\\": \\\"openclaw-control-ui\\\",\\n  \\\"id\\\": \\\"openclaw-control-ui\\\"\\n}\\n```\"}]}}\n",
+                    "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"tool-1\",\"name\":\"read\",\"arguments\":{}},{\"type\":\"text\",\"text\":\"done\"}],\"provider\":\"newapi\",\"model\":\"gpt-5.4\",\"usage\":{\"input\":100,\"output\":50,\"cacheRead\":25,\"cacheWrite\":5,\"totalTokens\":180,\"cost\":{\"total\":0.42}},\"stopReason\":\"toolUse\"}}\n",
+                    "{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"tool-1\",\"toolName\":\"read\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"isError\":false}}\n"
+                ),
+            );
+
+            write_file(
+                &archived_shadow_path,
+                concat!(
+                    "{\"type\":\"session\",\"timestamp\":\"2026-03-24T08:10:00.000Z\"}\n",
+                    "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"should-be-ignored\"}}\n",
+                    "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ignored\"}],\"provider\":\"newapi\",\"model\":\"gpt-5.4\",\"usage\":{\"input\":999,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":1000,\"cost\":{\"total\":9.99}},\"stopReason\":\"stop\"}}\n"
+                ),
+            );
+
+            write_file(
+                &archived_path,
+                concat!(
+                    "{\"type\":\"session\",\"timestamp\":\"2026-03-23T06:15:56.367Z\"}\n",
+                    "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Conversation info (untrusted metadata):\\n```json\\n{\\n  \\\"message_id\\\": \\\"openclaw-weixin:1774183384225-ba114f9e\\\",\\n  \\\"timestamp\\\": \\\"Sun 2026-03-22 20:43 GMT+8\\\"\\n}\\n```\\n\\n你好\"}]}}\n",
+                    "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"provider\":\"newapi\",\"model\":\"glm-5\",\"usage\":{\"input\":200,\"output\":80,\"cacheRead\":20,\"cacheWrite\":0,\"totalTokens\":300,\"cost\":{\"total\":1.0}},\"stopReason\":\"stop\"}}\n"
             ),
         );
 
-        write_file(
-            &archived_path,
-            concat!(
-                "{\"type\":\"session\",\"timestamp\":\"2026-03-23T06:15:56.367Z\"}\n",
-                "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Conversation info (untrusted metadata):\\n```json\\n{\\n  \\\"message_id\\\": \\\"openclaw-weixin:1774183384225-ba114f9e\\\",\\n  \\\"timestamp\\\": \\\"Sun 2026-03-22 20:43 GMT+8\\\"\\n}\\n```\\n\\n你好\"}]}}\n",
-                "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"provider\":\"newapi\",\"model\":\"glm-5\",\"usage\":{\"input\":200,\"output\":80,\"cacheRead\":20,\"cacheWrite\":0,\"totalTokens\":300,\"cost\":{\"total\":1.0}},\"stopReason\":\"stop\"}}\n"
-            ),
-        );
+            write_file(
+                &sessions_dir.join("sessions.json"),
+                &format!(
+                    "{{\"agent:main:main\":{{\"sessionFile\":\"{}\",\"lastChannel\":\"webchat\",\"runtimeMs\":1500}}}}",
+                    active_path.display()
+                ),
+            );
 
-        write_file(
-            &sessions_dir.join("sessions.json"),
-            &format!(
-                "{{\"agent:main:main\":{{\"sessionFile\":\"{}\",\"lastChannel\":\"webchat\",\"runtimeMs\":1500}}}}",
-                active_path.display()
-            ),
-        );
+            let snapshot = aggregate_usage_from_home(&home, &full_range()).expect("snapshot");
 
-        let snapshot = aggregate_usage_from_home(&home).expect("snapshot");
-
-        assert_eq!(snapshot.messages, 4);
-        assert_eq!(snapshot.user_messages, 2);
-        assert_eq!(snapshot.assistant_messages, 2);
-        assert_eq!(snapshot.session_count, 2);
-        assert_eq!(snapshot.total_tokens, 430);
-        assert_eq!(snapshot.input_tokens, 300);
-        assert_eq!(snapshot.output_tokens, 130);
-        assert_eq!(snapshot.cached_tokens, 45);
-        assert_eq!(snapshot.prompt_tokens, 350);
-        assert_eq!(snapshot.tool_calls, 1);
+            assert_eq!(snapshot.messages, 4);
+            assert_eq!(snapshot.user_messages, 2);
+            assert_eq!(snapshot.assistant_messages, 2);
+            assert_eq!(snapshot.session_count, 2);
+            assert_eq!(snapshot.total_tokens, 480);
+            assert_eq!(snapshot.input_tokens, 300);
+            assert_eq!(snapshot.output_tokens, 130);
+            assert_eq!(snapshot.cached_tokens, 45);
+            assert_eq!(snapshot.prompt_tokens, 350);
+            assert_eq!(snapshot.tool_calls, 1);
         assert_eq!(snapshot.tools_used, 1);
         assert!((snapshot.total_cost - 1.42).abs() < 0.0001);
         assert!((snapshot.cache_hit_rate - (45.0 / 350.0)).abs() < 0.0001);
 
-        assert_eq!(snapshot.models.len(), 2);
-        assert_eq!(snapshot.models[0].name, "glm-5");
-        assert_eq!(snapshot.models[0].tokens, 280);
-        assert_eq!(snapshot.models[1].name, "gpt-5.4");
-        assert_eq!(snapshot.models[1].tokens, 150);
+            assert_eq!(snapshot.models.len(), 2);
+            assert_eq!(snapshot.models[0].name, "glm-5");
+            assert_eq!(snapshot.models[0].tokens, 300);
+            assert_eq!(snapshot.models[1].name, "gpt-5.4");
+            assert_eq!(snapshot.models[1].tokens, 180);
 
-        assert_eq!(snapshot.providers.len(), 1);
-        assert_eq!(snapshot.providers[0].name, "newapi");
-        assert_eq!(snapshot.providers[0].tokens, 430);
+            assert_eq!(snapshot.providers.len(), 1);
+            assert_eq!(snapshot.providers[0].name, "newapi");
+            assert_eq!(snapshot.providers[0].tokens, 480);
 
-        assert_eq!(snapshot.channels.len(), 2);
-        assert_eq!(snapshot.channels[0].name, "openclaw-weixin");
-        assert_eq!(snapshot.channels[0].tokens, 280);
-        assert_eq!(snapshot.channels[1].name, "webchat");
-        assert_eq!(snapshot.channels[1].tokens, 150);
+            assert_eq!(snapshot.channels.len(), 2);
+            assert_eq!(snapshot.channels[0].name, "openclaw-weixin");
+            assert_eq!(snapshot.channels[0].tokens, 300);
+            assert_eq!(snapshot.channels[1].name, "webchat");
+            assert_eq!(snapshot.channels[1].tokens, 180);
 
-        assert_eq!(
-            snapshot.tools,
-            vec![ToolUsageEntry {
-                name: "read".to_string(),
+            assert_eq!(
+                snapshot.tools,
+                vec![ToolUsageEntry {
+                    name: "read".to_string(),
                 calls: 1,
             }]
         );
 
         fs::remove_dir_all(home).unwrap();
-    }
+        }
 
-    #[test]
-    fn falls_back_to_orphan_transcripts_without_sessions_index() {
-        let home = create_test_home("orphan");
-        let sessions_dir = home.join("agents/main/sessions");
-        fs::create_dir_all(&sessions_dir).unwrap();
+        #[test]
+        fn filters_by_message_timestamp_inside_selected_range() {
+            let home = create_test_home("range");
+            let sessions_dir = home.join("agents/main/sessions");
+            fs::create_dir_all(&sessions_dir).unwrap();
 
-        write_file(
-            &sessions_dir.join("orphan.jsonl"),
-            concat!(
-                "{\"type\":\"session\",\"timestamp\":\"2026-03-24T09:20:44.310Z\"}\n",
-                "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Sender (untrusted metadata):\\n```json\\n{\\n  \\\"label\\\": \\\"openclaw-control-ui\\\",\\n  \\\"id\\\": \\\"openclaw-control-ui\\\"\\n}\\n```\"}]}}\n",
-                "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"provider\":\"newapi\",\"model\":\"gpt-5.4\",\"usage\":{\"input\":10,\"output\":5,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":15,\"cost\":{\"total\":0.1}},\"stopReason\":\"stop\"}}\n"
-            ),
-        );
+            write_file(
+                &sessions_dir.join("first.jsonl"),
+                concat!(
+                    "{\"type\":\"session\",\"timestamp\":\"2026-03-24T09:20:44.310Z\"}\n",
+                    "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Sender (untrusted metadata):\\n```json\\n{\\n  \\\"label\\\": \\\"openclaw-control-ui\\\",\\n  \\\"id\\\": \\\"openclaw-control-ui\\\"\\n}\\n```\"}]}}\n",
+                    "{\"type\":\"message\",\"timestamp\":\"2026-03-24T09:21:00.000Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"provider\":\"newapi\",\"model\":\"gpt-5.4\",\"usage\":{\"input\":10,\"output\":5,\"cacheRead\":2,\"cacheWrite\":0,\"totalTokens\":17,\"cost\":{\"total\":0.1}},\"stopReason\":\"stop\"}}\n"
+                ),
+            );
 
-        let snapshot = aggregate_usage_from_home(&home).expect("snapshot");
-        assert_eq!(snapshot.total_tokens, 15);
-        assert_eq!(snapshot.session_count, 1);
-        assert_eq!(snapshot.channels[0].name, "webchat");
-        assert!(snapshot
-            .health
-            .as_ref()
-            .is_some_and(|health| health.partial));
+            write_file(
+                &sessions_dir.join("second.jsonl"),
+                concat!(
+                    "{\"type\":\"session\",\"timestamp\":\"2026-03-23T09:20:44.310Z\"}\n",
+                    "{\"type\":\"message\",\"timestamp\":\"2026-03-23T09:20:44.310Z\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+                    "{\"type\":\"message\",\"timestamp\":\"2026-03-23T09:21:00.000Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"old\"}],\"provider\":\"newapi\",\"model\":\"glm-5\",\"usage\":{\"input\":100,\"output\":50,\"cacheRead\":20,\"cacheWrite\":0,\"totalTokens\":170,\"cost\":{\"total\":0.2}},\"stopReason\":\"stop\"}}\n"
+                ),
+            );
 
-        fs::remove_dir_all(home).unwrap();
-    }
+            write_file(
+                &sessions_dir.join("sessions.json"),
+                "{}",
+            );
 
-    fn create_test_home(label: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+            let snapshot = aggregate_usage_from_home(
+                &home,
+                &single_day_range("2026-03-24"),
+            )
+            .expect("snapshot");
+
+            assert_eq!(snapshot.total_tokens, 17);
+            assert_eq!(snapshot.input_tokens, 10);
+            assert_eq!(snapshot.output_tokens, 5);
+            assert_eq!(snapshot.cached_tokens, 2);
+            assert_eq!(snapshot.messages, 2);
+            assert_eq!(snapshot.session_count, 2);
+            assert_eq!(snapshot.channels[0].name, "webchat");
+
+            fs::remove_dir_all(home).unwrap();
+        }
+
+        #[test]
+        fn falls_back_to_orphan_transcripts_without_sessions_index() {
+            let home = create_test_home("orphan");
+            let sessions_dir = home.join("agents/main/sessions");
+            fs::create_dir_all(&sessions_dir).unwrap();
+
+            write_file(
+                &sessions_dir.join("orphan.jsonl"),
+                concat!(
+                    "{\"type\":\"session\",\"timestamp\":\"2026-03-24T09:20:44.310Z\"}\n",
+                    "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Sender (untrusted metadata):\\n```json\\n{\\n  \\\"label\\\": \\\"openclaw-control-ui\\\",\\n  \\\"id\\\": \\\"openclaw-control-ui\\\"\\n}\\n```\"}]}}\n",
+                    "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"provider\":\"newapi\",\"model\":\"gpt-5.4\",\"usage\":{\"input\":10,\"output\":5,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":15,\"cost\":{\"total\":0.1}},\"stopReason\":\"stop\"}}\n"
+                ),
+            );
+
+            let snapshot = aggregate_usage_from_home(&home, &full_range()).expect("snapshot");
+            assert_eq!(snapshot.total_tokens, 15);
+            assert_eq!(snapshot.session_count, 1);
+            assert_eq!(snapshot.channels[0].name, "webchat");
+            assert!(snapshot
+                .health
+                .as_ref()
+                .is_some_and(|health| health.partial));
+
+            fs::remove_dir_all(home).unwrap();
+        }
+
+        fn create_test_home(label: &str) -> PathBuf {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
         std::env::temp_dir().join(format!("clawhelp-usage-{label}-{unique}"))
     }
 
-    fn write_file(path: &Path, content: &str) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
+        fn write_file(path: &Path, content: &str) {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(path, content).unwrap();
         }
-        fs::write(path, content).unwrap();
+
+        fn full_range() -> UsageDateRange {
+            UsageDateRange {
+                start_ms: 0,
+                end_ms: i64::MAX,
+            }
+        }
+
+        fn single_day_range(date: &str) -> UsageDateRange {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap();
+            UsageDateRange {
+                start_ms: local_day_start_ms(date).unwrap(),
+                end_ms: local_day_end_ms(date).unwrap(),
+            }
+        }
     }
-}

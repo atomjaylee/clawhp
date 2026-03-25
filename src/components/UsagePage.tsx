@@ -35,6 +35,7 @@ import type { CommandResult } from "@/types";
 // ---------------------------------------------------------------------------
 
 type UsageModuleTab = "overview" | "models" | "details";
+type UsagePreset = "today" | "7d" | "30d" | "custom";
 
 interface ModelEntry {
   name: string;
@@ -334,6 +335,25 @@ function fn(v: number): string { return v.toLocaleString("zh-CN"); }
 function fPct(v: number): string { return `${(v * 100).toFixed(1)}%`; }
 function fCost(v: number): string { return `$${v.toFixed(v >= 1 ? 2 : 4)}`; }
 
+function formatDateInput(date: Date): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function resolvePresetRange(preset: Exclude<UsagePreset, "custom">): { startDate: string; endDate: string } {
+  const end = new Date();
+  end.setHours(0, 0, 0, 0);
+  const start = new Date(end);
+  const daysBack = preset === "today" ? 0 : preset === "7d" ? 6 : 29;
+  start.setDate(start.getDate() - daysBack);
+  return {
+    startDate: formatDateInput(start),
+    endDate: formatDateInput(end),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Root component
 // ---------------------------------------------------------------------------
@@ -343,12 +363,15 @@ export default function UsagePage() {
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<UsageSnapshot>(() => emptySnapshot());
   const [tab, setTab] = useState<UsageModuleTab>("overview");
+  const [preset, setPreset] = useState<UsagePreset>("7d");
+  const [startDate, setStartDate] = useState(() => resolvePresetRange("7d").startDate);
+  const [endDate, setEndDate] = useState(() => resolvePresetRange("7d").endDate);
 
   const fetchUsage = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const result: CommandResult = await invoke("get_usage_snapshot");
+      const result: CommandResult = await invoke("get_usage_snapshot", { startDate, endDate });
       if (result.success) {
         setData(parseResponse(result.stdout));
       } else {
@@ -359,14 +382,14 @@ export default function UsagePage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [endDate, startDate]);
 
   useEffect(() => { void fetchUsage(); }, [fetchUsage]);
 
   const hasData = data.totalTokens > 0 || data.messages > 0 || data.models.length > 0;
   const hasBreakdowns = data.providers.length > 0 || data.channels.length > 0 || data.tools.length > 0 || data.agents.length > 0;
   const subtitle = data.source === "local_logs"
-    ? `基于本地会话与归档日志聚合${data.health?.partial ? "（部分明细已降级）" : ""}`
+    ? `基于本地会话按 OpenClaw 用量口径聚合${data.health?.partial ? "（部分明细已降级）" : ""}`
     : "跟踪 Token 消耗和 API 请求，了解各模型的资源使用分布";
 
   const moduleTabs: ModuleTabItem<UsageModuleTab>[] = [
@@ -374,6 +397,25 @@ export default function UsagePage() {
     { id: "models", label: "模型明细", icon: Layers, badge: data.models.length || undefined },
     ...(hasBreakdowns ? [{ id: "details" as const, label: "详情", icon: Server, badge: (data.providers.length + data.channels.length + data.tools.length) || undefined }] : []),
   ];
+
+  const applyPreset = useCallback((nextPreset: Exclude<UsagePreset, "custom">) => {
+    const range = resolvePresetRange(nextPreset);
+    setPreset(nextPreset);
+    setStartDate(range.startDate);
+    setEndDate(range.endDate);
+  }, []);
+
+  const updateStartDate = useCallback((nextValue: string) => {
+    setPreset("custom");
+    setStartDate(nextValue);
+    setEndDate((current) => (current < nextValue ? nextValue : current));
+  }, []);
+
+  const updateEndDate = useCallback((nextValue: string) => {
+    setPreset("custom");
+    setEndDate(nextValue);
+    setStartDate((current) => (current > nextValue ? nextValue : current));
+  }, []);
 
   return (
     <PageShell
@@ -390,7 +432,7 @@ export default function UsagePage() {
                 {data.source === "gateway_api"
                   ? "网关 API"
                   : data.source === "local_logs"
-                    ? "本地日志"
+                    ? "本地口径"
                     : "CLI 快照"}
               </Badge>
             )}
@@ -409,6 +451,48 @@ export default function UsagePage() {
           </CardContent>
         </Card>
       )}
+
+      <Card>
+        <CardContent className="flex flex-col gap-3 p-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-wrap items-center gap-2">
+            {([
+              { id: "today", label: "今天" },
+              { id: "7d", label: "7 天" },
+              { id: "30d", label: "30 天" },
+            ] as const).map((item) => (
+              <Button
+                key={item.id}
+                size="sm"
+                variant={preset === item.id ? "default" : "outline"}
+                className={cn("h-8", preset === item.id && "shadow-none")}
+                onClick={() => applyPreset(item.id)}
+              >
+                {item.label}
+              </Button>
+            ))}
+
+            <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5">
+              <input
+                type="date"
+                value={startDate}
+                onChange={(event) => updateStartDate(event.target.value)}
+                className="bg-transparent text-[11px] text-foreground/85 outline-none"
+              />
+              <span className="text-[10px] text-muted-foreground">至</span>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(event) => updateEndDate(event.target.value)}
+                className="bg-transparent text-[11px] text-foreground/85 outline-none"
+              />
+            </div>
+          </div>
+
+          <div className="text-[11px] text-muted-foreground">
+            当前范围：{startDate}{startDate !== endDate ? ` 至 ${endDate}` : ""}
+          </div>
+        </CardContent>
+      </Card>
 
       <MetricsGrid data={data} loading={loading && !hasData} />
 
