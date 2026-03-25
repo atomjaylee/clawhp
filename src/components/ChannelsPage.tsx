@@ -152,7 +152,7 @@ const CHANNEL_LABELS: Record<string, { label: string; color: string }> = {
   nostr: { label: "Nostr", color: "bg-purple-600/15 text-purple-400" },
   mattermost: { label: "Mattermost", color: "bg-blue-600/15 text-blue-400" },
   zalo: { label: "Zalo", color: "bg-blue-500/15 text-blue-400" },
-  wechat: { label: "微信", color: "bg-green-500/15 text-green-400" },
+  "openclaw-weixin": { label: "微信", color: "bg-green-500/15 text-green-400" },
 };
 
 const inputCls = "w-full h-9 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 text-[13px] text-foreground placeholder:text-muted-foreground/45 focus:outline-none focus:ring-1 focus:ring-sky-400/40";
@@ -356,10 +356,10 @@ export default function ChannelsPage() {
   const [wechatInstallProgress, setWechatInstallProgress] = useState(0);
   const [wechatInstallSuccess, setWechatInstallSuccess] = useState(false);
   const [wechatInstallLogs, setWechatInstallLogs] = useState<LogEntry[]>([]);
-  const [wechatScanPhase, setWechatScanPhase] = useState<"idle" | "running" | "done">("idle");
-  const [wechatScanLogs, setWechatScanLogs] = useState<LogEntry[]>([]);
-  const [wechatScanQrUrl, setWechatScanQrUrl] = useState("");
-  const [wechatScanQrDataUrl, setWechatScanQrDataUrl] = useState("");
+  const [wechatAuthQrDataUrl, setWechatAuthQrDataUrl] = useState("");
+  const [wechatAuthQrcode, setWechatAuthQrcode] = useState("");
+  const [wechatAuthPhase, setWechatAuthPhase] = useState<"idle" | "loading" | "waiting" | "scanned" | "done">("idle");
+  const [wechatAuthHint, setWechatAuthHint] = useState("");
 
   const installProgressRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const installLogEndRef = useRef<HTMLDivElement | null>(null);
@@ -438,34 +438,6 @@ export default function ChannelsPage() {
     });
     return () => { unlisten.then((fn) => fn()); };
   }, [appendWechatInstallLog]);
-
-  const appendWechatScanLog = useCallback((level: LogEntry["level"], message: string) => {
-    setWechatScanLogs((prev) => [...prev, { timestamp: new Date(), level, message }]);
-  }, []);
-
-  useEffect(() => {
-    const unlisten = listen<{ level: string; message: string }>("wechat-scan-log", (event) => {
-      const { level, message } = event.payload;
-      if (level === "qr_url") {
-        setWechatScanQrUrl(message);
-        void QRCode.toDataURL(message, {
-          errorCorrectionLevel: "M",
-          margin: 1,
-          width: 280,
-        }).then((dataUrl) => setWechatScanQrDataUrl(dataUrl));
-        return;
-      }
-      if (level === "done") {
-        setWechatScanPhase("done");
-        return;
-      }
-      if (message.trim()) {
-        const logLevel = level === "error" ? "error" : level === "warn" ? "warn" : "info";
-        appendWechatScanLog(logLevel as LogEntry["level"], message);
-      }
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, [appendWechatScanLog]);
 
   const agentLabelById = useMemo(() => {
     const labels = new Map<string, string>();
@@ -764,7 +736,7 @@ export default function ChannelsPage() {
         };
       }
 
-      if (channel.channel === "feishu" || channel.channel === "wechat") {
+      if (channel.channel === "feishu" || channel.channel === "openclaw-weixin") {
         if (!channel.boundAgentId) {
           return {
             channel: channel.channel,
@@ -1026,7 +998,7 @@ export default function ChannelsPage() {
     return opts;
   }, [wechatAvailableAgents, wechatBindingCatalog, wechatEditingAccountId, wechatCurrentBoundAgentId]);
 
-  const wechatDialogBusy = wechatInstallPhase === "running" || wechatScanPhase === "running" || wechatSaving || wechatUnbindLoading;
+  const wechatDialogBusy = wechatInstallPhase === "running" || wechatAuthPhase === "loading" || wechatAuthPhase === "waiting" || wechatSaving || wechatUnbindLoading;
 
   const loadWechatSetup = useCallback(async () => {
     setWechatSetupLoading(true);
@@ -1116,10 +1088,10 @@ export default function ChannelsPage() {
     setWechatInstallProgress(0);
     setWechatInstallSuccess(false);
     setWechatInstallLogs([]);
-    setWechatScanPhase("idle");
-    setWechatScanLogs([]);
-    setWechatScanQrUrl("");
-    setWechatScanQrDataUrl("");
+    setWechatAuthQrDataUrl("");
+    setWechatAuthQrcode("");
+    setWechatAuthPhase("idle");
+    setWechatAuthHint("");
   }, []);
 
   const openWechatDialog = useCallback(async (accountId?: string) => {
@@ -1157,7 +1129,7 @@ export default function ChannelsPage() {
       const latest = await loadWechatSetup();
       if (latest?.pluginInstalled) {
         setWechatSetupStep("scan");
-        setWechatBindingHint("插件已安装好。现在点击「开始扫码连接」即可在应用内显示二维码。");
+        setWechatBindingHint("插件已安装好，现在可以扫码连接微信。");
       }
     } catch (e) {
       setWechatInstallPhase("done");
@@ -1168,37 +1140,104 @@ export default function ChannelsPage() {
     }
   }, [appendWechatInstallLog, loadWechatSetup]);
 
-  const handleStartWechatScan = useCallback(async () => {
-    setWechatScanPhase("running");
-    setWechatScanLogs([]);
-    setWechatScanQrUrl("");
-    setWechatScanQrDataUrl("");
+  const handleStartWechatAuth = useCallback(async () => {
+    setWechatAuthPhase("loading");
+    setWechatAuthQrDataUrl("");
+    setWechatAuthQrcode("");
+    setWechatAuthHint("");
     setWechatBindingError("");
-    appendWechatScanLog("info", "正在启动微信扫码连接...");
     try {
-      const result: CommandResult = await invoke("start_wechat_scan_session");
-      if (result.success) {
-        const parsed = parseJsonValue<{ qrUrl?: string } | null>(result.stdout, null);
-        if (parsed?.qrUrl && !wechatScanQrUrl) {
-          setWechatScanQrUrl(parsed.qrUrl);
-          const dataUrl = await QRCode.toDataURL(parsed.qrUrl, {
-            errorCorrectionLevel: "M",
-            margin: 1,
-            width: 280,
-          });
-          setWechatScanQrDataUrl(dataUrl);
-        }
-        await Promise.all([loadWechatSetup(), loadWechatBindingCatalog(wechatEditingAccountId)]);
-        void refreshAll({ silent: true });
-      } else {
-        setWechatBindingError(result.stderr || "微信扫码连接失败");
+      const result: CommandResult = await invoke("start_wechat_auth_session");
+      if (!result.success) {
+        setWechatBindingError(result.stderr || "获取微信二维码失败");
+        setWechatAuthPhase("idle");
+        return;
       }
+      const payload = parseJsonValue<{ qrcodeUrl?: string; qrcode?: string; expireInSeconds?: number } | null>(result.stdout, null);
+      if (!payload?.qrcodeUrl || !payload?.qrcode) {
+        setWechatBindingError("未获取到有效的微信二维码");
+        setWechatAuthPhase("idle");
+        return;
+      }
+      const dataUrl = await QRCode.toDataURL(payload.qrcodeUrl, {
+        errorCorrectionLevel: "M",
+        margin: 1,
+        width: 280,
+      });
+      setWechatAuthQrDataUrl(dataUrl);
+      setWechatAuthQrcode(payload.qrcode);
+      setWechatAuthPhase("waiting");
+      setWechatAuthHint("请用微信扫一扫，扫码成功后会自动继续。");
     } catch (e) {
       setWechatBindingError(`${e}`);
-    } finally {
-      setWechatScanPhase("done");
+      setWechatAuthPhase("idle");
     }
-  }, [appendWechatScanLog, wechatScanQrUrl, wechatEditingAccountId, loadWechatSetup, loadWechatBindingCatalog, refreshAll]);
+  }, []);
+
+  useEffect(() => {
+    if (wechatAuthPhase !== "waiting" && wechatAuthPhase !== "scanned") return;
+    if (!wechatAuthQrcode) return;
+    let cancelled = false;
+    const poll = async () => {
+      while (!cancelled) {
+        try {
+          const result: CommandResult = await invoke("poll_wechat_auth_session", { qrcode: wechatAuthQrcode });
+          if (cancelled) break;
+          if (!result.success) { await new Promise((r) => setTimeout(r, 3000)); continue; }
+          const payload = parseJsonValue<{
+            status?: string;
+            botToken?: string;
+            accountId?: string;
+            baseUrl?: string;
+            userId?: string;
+            error?: string;
+          } | null>(result.stdout, null);
+          if (!payload) { await new Promise((r) => setTimeout(r, 3000)); continue; }
+
+          if (payload.status === "scaned" && wechatAuthPhase !== "scanned") {
+            setWechatAuthPhase("scanned");
+            setWechatAuthHint("已扫码，请在微信上确认...");
+          } else if (payload.status === "success" && payload.accountId && payload.botToken) {
+            setWechatAuthPhase("done");
+            setWechatAuthHint("微信连接成功！");
+            setWechatEditingAccountId(payload.accountId);
+
+            const agentId = wechatSelectedAgentId.trim();
+            await invoke("save_wechat_auth_result", {
+              accountId: payload.accountId,
+              botToken: payload.botToken,
+              baseUrl: payload.baseUrl ?? null,
+              userId: payload.userId ?? null,
+              agentId: agentId || "",
+            });
+
+            await Promise.all([
+              loadWechatSetup(),
+              loadWechatBindingCatalog(payload.accountId),
+            ]);
+            void refreshAll({ silent: true });
+            setWechatSetupStep("done");
+            break;
+          } else if (payload.status === "expired") {
+            setWechatAuthPhase("idle");
+            setWechatAuthQrDataUrl("");
+            setWechatAuthQrcode("");
+            setWechatAuthHint("二维码已过期，请重新生成。");
+            break;
+          } else if (payload.status === "error") {
+            setWechatBindingError(payload.error || "轮询状态失败");
+            setWechatAuthPhase("idle");
+            break;
+          }
+        } catch {
+          // network hiccup, retry
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    };
+    void poll();
+    return () => { cancelled = true; };
+  }, [wechatAuthPhase, wechatAuthQrcode, wechatSelectedAgentId, loadWechatSetup, loadWechatBindingCatalog, refreshAll]);
 
   const handleBindWechat = useCallback(async () => {
     const accountId = wechatEditingAccountId?.trim();
@@ -1676,7 +1715,7 @@ export default function ChannelsPage() {
                                 账号: {channel.account}
                                 {!channel.enabled && <span className="ml-2 text-amber-400">已禁用</span>}
                               </p>
-                              {(channel.channel === "feishu" || channel.channel === "wechat") && (
+                              {(channel.channel === "feishu" || channel.channel === "openclaw-weixin") && (
                                 <p className="mt-1 text-[11px] text-muted-foreground">
                                   Agent: {channel.boundAgentName || channel.boundAgentId || "未绑定"}
                                 </p>
@@ -1702,7 +1741,7 @@ export default function ChannelsPage() {
                                 <TooltipContent>管理飞书官方插件</TooltipContent>
                               </Tooltip>
                             )}
-                            {channel.channel === "wechat" && (
+                            {channel.channel === "openclaw-weixin" && (
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <Button
@@ -2388,7 +2427,7 @@ export default function ChannelsPage() {
                 <p className="text-[12px] text-muted-foreground">
                   确定要移除 {pendingRemoval.label} 频道 `{pendingRemoval.account}` 吗？这个操作会删除当前频道配置。
                 </p>
-                {(pendingRemoval.channel === "feishu" || pendingRemoval.channel === "wechat") && (
+                {(pendingRemoval.channel === "feishu" || pendingRemoval.channel === "openclaw-weixin") && (
                   <p className="text-[12px] text-muted-foreground">
                     如果你只是想更换 Agent，建议先进入“管理飞书接入”里解绑，而不是直接删除频道。
                   </p>
@@ -2463,7 +2502,7 @@ export default function ChannelsPage() {
                           { id: "status" as WechatDialogTab, label: "当前状态", icon: CheckCircle2, badge: wechatPluginStatus?.pluginInstalled ? "已装" : "待装" },
                         ] satisfies ModuleTabItem<WechatDialogTab>[])
                         : ([
-                          { id: "scan" as WechatDialogTab, label: "扫码连接", icon: Radio, badge: wechatPluginStatus?.channelConfigured ? "已连接" : "待扫码" },
+                          { id: "scan" as WechatDialogTab, label: "扫码连接", icon: Radio, badge: wechatAuthPhase === "waiting" || wechatAuthPhase === "scanned" ? "扫码中" : wechatPluginStatus?.channelConfigured ? "已连接" : "待扫码" },
                           { id: "agent" as WechatDialogTab, label: "绑定 Agent", icon: Bot, badge: wechatCurrentBoundAgentId ? "已绑定" : (wechatSelectedAgentId ? "已选" : "待选") },
                           { id: "status" as WechatDialogTab, label: "当前状态", icon: CheckCircle2, badge: wechatCurrentBoundAgentId ? "已绑定" : "待绑定" },
                         ] satisfies ModuleTabItem<WechatDialogTab>[])
@@ -2530,90 +2569,86 @@ export default function ChannelsPage() {
                           </p>
                         </div>
 
-                        {wechatScanQrDataUrl ? (
+                        {wechatAuthPhase === "loading" && (
+                          <div className="flex items-center justify-center py-12 text-muted-foreground">
+                            <Loader2 size={24} className="mr-3 animate-spin text-green-400" />
+                            <span className="text-[13px]">正在获取二维码...</span>
+                          </div>
+                        )}
+
+                        {(wechatAuthPhase === "waiting" || wechatAuthPhase === "scanned") && wechatAuthQrDataUrl && (
                           <div className="space-y-3">
                             <div className="rounded-2xl border border-green-500/15 bg-green-500/8 p-5 text-center">
-                              <img src={wechatScanQrDataUrl} alt="微信扫码二维码" className="mx-auto h-56 w-56 rounded-xl bg-white p-3" />
-                              <p className="mt-3 text-[13px] font-medium text-green-50">请用微信扫一扫</p>
-                              <p className="mt-1 text-[12px] text-green-100/75">扫码成功后微信 ClawBot 插件会自动启用</p>
+                              <img src={wechatAuthQrDataUrl} alt="微信扫码二维码" className="mx-auto h-56 w-56 rounded-xl bg-white p-3" />
+                              <p className="mt-3 text-[13px] font-medium text-green-50">
+                                {wechatAuthPhase === "scanned" ? "已扫码，请在微信上确认" : "请用微信扫一扫"}
+                              </p>
+                              {wechatAuthHint && (
+                                <p className="mt-1 text-[12px] text-green-100/75">{wechatAuthHint}</p>
+                              )}
+                              {wechatAuthPhase === "scanned" && (
+                                <div className="mt-2 flex items-center justify-center gap-2 text-green-300">
+                                  <Loader2 size={14} className="animate-spin" />
+                                  <span className="text-[12px]">等待确认中...</span>
+                                </div>
+                              )}
                             </div>
-                            {wechatScanPhase === "done" && (
-                              <div className="flex flex-wrap gap-2">
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={async () => {
-                                    await Promise.all([loadWechatSetup(), loadWechatBindingCatalog(wechatEditingAccountId)]);
-                                    void refreshAll({ silent: true });
-                                  }}
-                                  disabled={wechatSetupLoading || wechatBindingLoading}
-                                >
-                                  {wechatSetupLoading ? <Loader2 className="animate-spin" /> : <RefreshCw size={14} />}
-                                  刷新状态
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => void handleStartWechatScan()}
-                                  disabled={wechatScanPhase === "running"}
-                                >
-                                  <Radio size={14} />
-                                  重新生成二维码
-                                </Button>
+                          </div>
+                        )}
+
+                        {wechatAuthPhase === "done" && (
+                          <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/8 p-3 text-[12px] text-emerald-100/90">
+                            {wechatAuthHint || "微信连接成功！"}
+                            {wechatSelectedAgentId ? " Agent 已自动绑定。" : " 请切到「绑定 Agent」标签选择一个 Agent。"}
+                          </div>
+                        )}
+
+                        {wechatAuthPhase === "idle" && (
+                          <>
+                            {wechatPluginStatus?.channelConfigured ? (
+                              <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/8 p-3 text-[12px] text-emerald-100/90">
+                                微信已连接。如需重新连接可点击下方按钮重新生成二维码。
+                              </div>
+                            ) : (
+                              <div className="rounded-xl border border-green-500/15 bg-green-500/8 p-4 text-[12px] text-green-100/90">
+                                <p className="font-medium">微信 ClawBot 扫码流程：</p>
+                                <ol className="mt-2 list-inside list-decimal space-y-1 text-green-100/75">
+                                  <li>点击「开始扫码连接」，几秒内生成二维码</li>
+                                  <li>打开微信，使用扫一扫功能扫描二维码</li>
+                                  <li>扫码成功后自动完成连接并保存配置</li>
+                                </ol>
                               </div>
                             )}
-                          </div>
-                        ) : wechatScanPhase === "running" ? (
-                          <div className="space-y-3">
-                            <div className="flex items-center justify-center py-12 text-muted-foreground">
-                              <Loader2 size={24} className="mr-3 animate-spin text-green-400" />
-                              <span className="text-[13px]">正在生成二维码，请稍候...</span>
-                            </div>
-                            {wechatScanLogs.length > 0 && (
-                              <Card className="border-white/[0.06] bg-[#060b11]">
-                                <CardContent className="p-0">
-                                  <ScrollArea className="h-28">
-                                    <div className="space-y-1 p-3 font-mono text-[11px]">
-                                      {wechatScanLogs.map((log, i) => (
-                                        <div key={`${log.timestamp.getTime()}-${i}`} className="flex gap-2 leading-5">
-                                          <span className="w-[60px] shrink-0 text-muted-foreground/40">{log.timestamp.toLocaleTimeString()}</span>
-                                          <span className={log.level === "error" ? "text-red-400" : log.level === "success" ? "text-emerald-400" : "text-foreground/70"}>
-                                            {log.message}
-                                          </span>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </ScrollArea>
-                                </CardContent>
-                              </Card>
+
+                            {wechatSelectedAgentId.trim() === "" && !wechatCurrentBoundAgentId && wechatAgentOptions.length > 0 && (
+                              <div className="space-y-1">
+                                <label className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+                                  扫码时自动绑定的 Agent（可选）
+                                </label>
+                                <div className="relative">
+                                  <Bot size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                                  <select
+                                    className={`${inputCls} appearance-none pl-9`}
+                                    value={wechatSelectedAgentId}
+                                    onChange={(e) => setWechatSelectedAgentId(e.target.value)}
+                                  >
+                                    <option value="">暂不绑定，稍后选择</option>
+                                    {wechatAgentOptions.map((a) => (
+                                      <option key={a.id} value={a.id}>{a.label}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </div>
                             )}
-                          </div>
-                        ) : (
-                          <>
-                            <div className="rounded-xl border border-green-500/15 bg-green-500/8 p-4 text-[12px] text-green-100/90">
-                              <p className="font-medium">微信 ClawBot 扫码流程：</p>
-                              <ol className="mt-2 list-inside list-decimal space-y-1 text-green-100/75">
-                                <li>点击下方「开始扫码连接」生成二维码</li>
-                                <li>打开微信，使用扫一扫功能扫描二维码</li>
-                                <li>扫码成功后，切到"绑定 Agent"标签绑定一个 Agent</li>
-                              </ol>
-                            </div>
 
                             <Button
                               size="sm"
-                              onClick={() => void handleStartWechatScan()}
-                              disabled={wechatScanPhase === "running"}
+                              onClick={() => void handleStartWechatAuth()}
                             >
                               <Radio size={14} />
-                              开始扫码连接
+                              {wechatPluginStatus?.channelConfigured ? "重新扫码连接" : "开始扫码连接"}
                             </Button>
                           </>
-                        )}
-
-                        {wechatPluginStatus?.channelConfigured && wechatScanPhase !== "running" && (
-                          <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/8 p-3 text-[12px] text-emerald-100/90">
-                            微信已连接成功！请切到「绑定 Agent」标签选择一个 Agent 完成配置。
-                          </div>
                         )}
                       </CardContent>
                     </Card>

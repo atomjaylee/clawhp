@@ -9,17 +9,14 @@ use crate::event::emit_install_event;
 use crate::stream_command_to_event;
 use crate::state::normalize_agent_id_key;
 use crate::terminal::open_in_external_terminal;
-use crate::types::{CommandResult, InstallEvent};
+use crate::types::CommandResult;
 use crate::util::path::{get_openclaw_home, get_openclaw_program};
-use crate::util::text::clean_line;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 // ---------- Terminal commands ----------
 
@@ -1935,6 +1932,8 @@ struct WechatAccountBindingCatalogPayload {
 
 // ---------- WeChat helpers ----------
 
+const WECHAT_CHANNEL_KEY: &str = "openclaw-weixin";
+
 fn wechat_official_plugin_dir() -> PathBuf {
     PathBuf::from(get_openclaw_home())
         .join("extensions")
@@ -1954,20 +1953,21 @@ fn is_wechat_route_binding(binding: &serde_json::Value) -> bool {
         .get("match")
         .and_then(|value| value.get("channel"))
         .and_then(|value| value.as_str())
-        .map(|value| value.trim().eq_ignore_ascii_case("wechat"))
+        .map(|value| value.trim().eq_ignore_ascii_case(WECHAT_CHANNEL_KEY))
         .unwrap_or(false)
 }
 
 fn read_wechat_default_account_id(config: &serde_json::Value) -> String {
+    let ch_path = format!("/channels/{}", WECHAT_CHANNEL_KEY);
     config
-        .pointer("/channels/wechat/defaultAccount")
+        .pointer(&format!("{}/defaultAccount", ch_path))
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string())
         .or_else(|| {
             config
-                .pointer("/channels/wechat/accounts")
+                .pointer(&format!("{}/accounts", ch_path))
                 .and_then(|value| value.as_object())
                 .and_then(|value| value.keys().next().cloned())
         })
@@ -2051,7 +2051,7 @@ fn collect_wechat_account_binding_catalog(
     let default_account_id = read_wechat_default_account_id(config);
     let binding_map = read_wechat_account_binding_map(config);
     let wechat = config
-        .pointer("/channels/wechat")
+        .pointer(&format!("/channels/{}", WECHAT_CHANNEL_KEY))
         .and_then(|value| value.as_object())
         .cloned()
         .unwrap_or_default();
@@ -2165,7 +2165,7 @@ fn upsert_wechat_account_binding(
         bindings.push(serde_json::json!({
             "agentId": clean_agent_id,
             "match": {
-                "channel": "wechat",
+                "channel": WECHAT_CHANNEL_KEY,
                 "accountId": clean_account_id,
             },
         }));
@@ -2215,11 +2215,11 @@ fn unbind_wechat_channel_account_internal(account_id: &str) -> Result<(), String
     }
 
     if config
-        .pointer("/channels/wechat/accounts")
+        .pointer(&format!("/channels/{}/accounts", WECHAT_CHANNEL_KEY))
         .and_then(|value| value.as_object())
         .is_some()
     {
-        config["channels"]["wechat"]["accounts"][account_id.trim()]["enabled"] =
+        config["channels"][WECHAT_CHANNEL_KEY]["accounts"][account_id.trim()]["enabled"] =
             serde_json::json!(false);
     }
 
@@ -2228,167 +2228,328 @@ fn unbind_wechat_channel_account_internal(account_id: &str) -> Result<(), String
 
 // ---------- WeChat Tauri commands ----------
 
-const WECHAT_SCAN_EVENT: &str = "wechat-scan-log";
+const WECHAT_API_BASE: &str = "https://ilinkai.weixin.qq.com";
+const WECHAT_BOT_TYPE: &str = "3";
 
-#[tauri::command]
-pub(crate) async fn start_wechat_scan_session(app: AppHandle) -> CommandResult {
-    tokio::task::spawn_blocking(move || {
-        emit_install_event(&app, WECHAT_SCAN_EVENT, "info", "正在启动微信扫码连接...");
-
-        let mut cmd = Command::new("npx");
-        cmd.args([
-            "-y",
-            &format!("{}@latest", WECHAT_OFFICIAL_PLUGIN_PACKAGE),
-            "install",
-        ])
-        .env("PATH", crate::util::path::get_full_path())
-        .env("NO_COLOR", "1")
-        .env("FORCE_COLOR", "0")
-        .env("TERM", "dumb")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null());
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                let msg = format!("无法启动 npx: {}", e);
-                emit_install_event(&app, WECHAT_SCAN_EVENT, "error", &msg);
-                emit_install_event(&app, WECHAT_SCAN_EVENT, "done", "error");
-                return CommandResult {
-                    success: false,
-                    stdout: String::new(),
-                    stderr: msg,
-                    code: None,
-                };
-            }
-        };
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        let app_out = app.clone();
-        let stdout_handle = std::thread::spawn(move || {
-            let mut lines = Vec::new();
-            let mut found_url: Option<String> = None;
-            if let Some(out) = stdout {
-                for line in BufReader::new(out).lines().map_while(Result::ok) {
-                    let cleaned = clean_line(&line);
-                    if !cleaned.is_empty() {
-                        let _ = app_out.emit(
-                            WECHAT_SCAN_EVENT,
-                            InstallEvent {
-                                level: "info".into(),
-                                message: cleaned.clone(),
-                            },
-                        );
-                        if found_url.is_none() {
-                            if let Some(url) = extract_url(&cleaned) {
-                                found_url = Some(url.clone());
-                                let _ = app_out.emit(
-                                    WECHAT_SCAN_EVENT,
-                                    InstallEvent {
-                                        level: "qr_url".into(),
-                                        message: url,
-                                    },
-                                );
-                            }
-                        }
-                        lines.push(cleaned);
-                    }
-                }
-            }
-            (lines, found_url)
-        });
-
-        let app_err = app.clone();
-        let stderr_handle = std::thread::spawn(move || {
-            let mut lines = Vec::new();
-            let mut found_url: Option<String> = None;
-            if let Some(err) = stderr {
-                for line in BufReader::new(err).lines().map_while(Result::ok) {
-                    let cleaned = clean_line(&line);
-                    if !cleaned.is_empty() {
-                        let _ = app_err.emit(
-                            WECHAT_SCAN_EVENT,
-                            InstallEvent {
-                                level: "info".into(),
-                                message: cleaned.clone(),
-                            },
-                        );
-                        if found_url.is_none() {
-                            if let Some(url) = extract_url(&cleaned) {
-                                found_url = Some(url.clone());
-                                let _ = app_err.emit(
-                                    WECHAT_SCAN_EVENT,
-                                    InstallEvent {
-                                        level: "qr_url".into(),
-                                        message: url,
-                                    },
-                                );
-                            }
-                        }
-                        lines.push(cleaned);
-                    }
-                }
-            }
-            (lines, found_url)
-        });
-
-        let (stdout_lines, stdout_url) = stdout_handle.join().unwrap_or_default();
-        let (stderr_lines, stderr_url) = stderr_handle.join().unwrap_or_default();
-        let found_qr_url = stdout_url.or(stderr_url);
-
-        let status = child.wait();
-        let code = status.as_ref().ok().and_then(|s| s.code());
-        let success = status.map(|s| s.success()).unwrap_or(false);
-
-        if success || found_qr_url.is_some() {
-            emit_install_event(&app, WECHAT_SCAN_EVENT, "done", "success");
-        } else {
-            emit_install_event(&app, WECHAT_SCAN_EVENT, "done", "error");
-        }
-
-        let has_qr = found_qr_url.is_some();
-        let payload = serde_json::json!({
-            "qrUrl": found_qr_url.unwrap_or_default(),
-            "stdout": stdout_lines.join("\n"),
-            "stderr": stderr_lines.join("\n"),
-        });
-
-        CommandResult {
-            success: success || has_qr,
-            stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
-            stderr: if success { String::new() } else { stderr_lines.join("\n") },
-            code,
-        }
-    })
-    .await
-    .unwrap_or_else(|e| CommandResult {
-        success: false,
-        stdout: String::new(),
-        stderr: format!("任务异常: {}", e),
-        code: None,
-    })
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WechatAuthStartPayload {
+    qrcode_url: String,
+    qrcode: String,
+    expire_in_seconds: u64,
 }
 
-fn extract_url(line: &str) -> Option<String> {
-    for word in line.split_whitespace() {
-        let trimmed = word.trim_matches(|c: char| c == '"' || c == '\'' || c == '<' || c == '>' || c == '(' || c == ')');
-        if (trimmed.starts_with("https://") || trimmed.starts_with("http://"))
-            && trimmed.len() > 10
-        {
-            return Some(trimmed.to_string());
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WechatAuthPollPayload {
+    status: String,
+    bot_token: Option<String>,
+    account_id: Option<String>,
+    base_url: Option<String>,
+    user_id: Option<String>,
+    error: Option<String>,
+}
+
+fn wechat_api_base_url() -> String {
+    let config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+    config
+        .pointer(&format!("/channels/{}/baseUrl", WECHAT_CHANNEL_KEY))
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or(WECHAT_API_BASE)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+#[tauri::command]
+pub(crate) async fn start_wechat_auth_session() -> CommandResult {
+    let base = wechat_api_base_url();
+    let url = format!(
+        "{}/ilink/bot/get_bot_qrcode?bot_type={}",
+        base, WECHAT_BOT_TYPE
+    );
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| Client::new());
+
+    let response = match client.get(&url).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: format!("请求微信二维码失败: {}", e),
+                code: Some(1),
+            };
         }
+    };
+
+    if !response.status().is_success() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: format!("微信二维码接口返回错误: HTTP {}", response.status()),
+            code: Some(1),
+        };
     }
-    None
+
+    let body: serde_json::Value = match response.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return CommandResult {
+                success: false,
+                stdout: String::new(),
+                stderr: format!("解析微信二维码响应失败: {}", e),
+                code: Some(1),
+            };
+        }
+    };
+
+    let qrcode = body
+        .get("qrcode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let qrcode_url = body
+        .get("qrcode_img_content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if qrcode.is_empty() || qrcode_url.is_empty() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "微信接口未返回有效的二维码数据".to_string(),
+            code: Some(1),
+        };
+    }
+
+    let payload = WechatAuthStartPayload {
+        qrcode_url,
+        qrcode,
+        expire_in_seconds: 300,
+    };
+
+    CommandResult {
+        success: true,
+        stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn poll_wechat_auth_session(qrcode: String) -> CommandResult {
+    let base = wechat_api_base_url();
+    let url = format!(
+        "{}/ilink/bot/get_qrcode_status",
+        base,
+    );
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(40))
+        .build()
+        .unwrap_or_else(|_| Client::new());
+
+    let response = match client
+        .get(&url)
+        .query(&[("qrcode", qrcode.trim())])
+        .header("iLink-App-ClientVersion", "1")
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            let payload = WechatAuthPollPayload {
+                status: "error".to_string(),
+                bot_token: None,
+                account_id: None,
+                base_url: None,
+                user_id: None,
+                error: Some(format!("轮询请求失败: {}", e)),
+            };
+            return CommandResult {
+                success: true,
+                stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+                stderr: String::new(),
+                code: Some(0),
+            };
+        }
+    };
+
+    let body: serde_json::Value = match response.json().await {
+        Ok(v) => v,
+        Err(_) => {
+            let payload = WechatAuthPollPayload {
+                status: "wait".to_string(),
+                bot_token: None,
+                account_id: None,
+                base_url: None,
+                user_id: None,
+                error: None,
+            };
+            return CommandResult {
+                success: true,
+                stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+                stderr: String::new(),
+                code: Some(0),
+            };
+        }
+    };
+
+    let status_str = body
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("wait")
+        .to_string();
+
+    let payload = if status_str == "confirmed" {
+        let bot_token = body
+            .get("bot_token")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let account_id = body
+            .get("ilink_bot_id")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let base_url_val = body
+            .get("baseurl")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let user_id = body
+            .get("ilink_user_id")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+
+        WechatAuthPollPayload {
+            status: "success".to_string(),
+            bot_token,
+            account_id,
+            base_url: base_url_val,
+            user_id,
+            error: None,
+        }
+    } else {
+        WechatAuthPollPayload {
+            status: status_str,
+            bot_token: None,
+            account_id: None,
+            base_url: None,
+            user_id: None,
+            error: None,
+        }
+    };
+
+    CommandResult {
+        success: true,
+        stdout: serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+        stderr: String::new(),
+        code: Some(0),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn save_wechat_auth_result(
+    account_id: String,
+    bot_token: String,
+    base_url: Option<String>,
+    user_id: Option<String>,
+    agent_id: String,
+) -> CommandResult {
+    let account_id = account_id.trim().to_string();
+    let bot_token = bot_token.trim().to_string();
+    let agent_id = agent_id.trim().to_string();
+
+    if account_id.is_empty() || bot_token.is_empty() {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: "微信扫码结果缺少 accountId 或 botToken".to_string(),
+            code: Some(1),
+        };
+    }
+
+    let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
+
+    if config.get("channels").is_none() || !config["channels"].is_object() {
+        config["channels"] = serde_json::json!({});
+    }
+    if config
+        .pointer(&format!("/channels/{}", WECHAT_CHANNEL_KEY))
+        .is_none()
+    {
+        config["channels"][WECHAT_CHANNEL_KEY] = serde_json::json!({});
+    }
+
+    config["channels"][WECHAT_CHANNEL_KEY]["enabled"] = serde_json::json!(true);
+    config["channels"][WECHAT_CHANNEL_KEY]["botToken"] = serde_json::json!(bot_token);
+
+    if let Some(base) = base_url.as_deref().filter(|v| !v.trim().is_empty()) {
+        config["channels"][WECHAT_CHANNEL_KEY]["baseUrl"] = serde_json::json!(base);
+    }
+
+    if config
+        .pointer(&format!("/channels/{}/accounts", WECHAT_CHANNEL_KEY))
+        .is_none()
+    {
+        config["channels"][WECHAT_CHANNEL_KEY]["accounts"] = serde_json::json!({});
+    }
+    config["channels"][WECHAT_CHANNEL_KEY]["accounts"][&account_id] = serde_json::json!({
+        "enabled": true,
+        "botToken": bot_token,
+        "name": format!("微信 ClawBot ({})", &account_id[..account_id.len().min(8)]),
+    });
+    config["channels"][WECHAT_CHANNEL_KEY]["defaultAccount"] =
+        serde_json::json!(account_id);
+
+    if let Some(uid) = user_id.as_deref().filter(|v| !v.trim().is_empty()) {
+        let allow_from = config["channels"][WECHAT_CHANNEL_KEY]["accounts"][&account_id]
+            .get("allowFrom")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut new_allow = allow_from;
+        let uid_val = serde_json::json!(uid);
+        if !new_allow.contains(&uid_val) {
+            new_allow.push(uid_val);
+        }
+        config["channels"][WECHAT_CHANNEL_KEY]["accounts"][&account_id]["allowFrom"] =
+            serde_json::json!(new_allow);
+    }
+
+    ensure_wechat_plugin_entries(&mut config);
+
+    if !agent_id.is_empty() {
+        let _ = upsert_wechat_account_binding(&mut config, &account_id, &agent_id);
+    }
+
+    if let Err(e) = write_openclaw_config(&config) {
+        return CommandResult {
+            success: false,
+            stdout: String::new(),
+            stderr: format!("保存配置失败: {}", e),
+            code: Some(1),
+        };
+    }
+
+    restart_gateway_in_background();
+
+    CommandResult {
+        success: true,
+        stdout: format!("微信 ClawBot 已连接并保存配置 ({})", account_id),
+        stderr: String::new(),
+        code: Some(0),
+    }
 }
 
 #[tauri::command]
 pub(crate) fn get_wechat_plugin_status() -> CommandResult {
     let config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
     let wechat = config
-        .pointer("/channels/wechat")
+        .pointer(&format!("/channels/{}", WECHAT_CHANNEL_KEY))
         .and_then(|value| value.as_object())
         .cloned()
         .unwrap_or_default();
@@ -2542,7 +2703,7 @@ pub(crate) fn get_wechat_channel_config(account_id: Option<String>) -> CommandRe
         .map(|value| value.to_string());
     let config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
     let wechat = config
-        .pointer("/channels/wechat")
+        .pointer(&format!("/channels/{}", WECHAT_CHANNEL_KEY))
         .and_then(|value| value.as_object())
         .cloned()
         .unwrap_or_default();
@@ -2815,6 +2976,9 @@ fn channel_has_root_snapshot(
     if channel_name == "feishu" {
         return feishu_has_root_snapshot(channel);
     }
+    if channel_name == WECHAT_CHANNEL_KEY {
+        return true;
+    }
 
     channel.iter().any(|(key, value)| {
         if key == "accounts" || key == "defaultAccount" || key == "enabled" {
@@ -2901,7 +3065,7 @@ fn build_channels_snapshot_payload() -> serde_json::Value {
                     .unwrap_or(channel_enabled);
                 let bound_agent_id = match channel_name.as_str() {
                     "feishu" => feishu_binding_map.get(account_id).cloned(),
-                    "wechat" => wechat_binding_map.get(account_id).cloned(),
+                    ch if ch == WECHAT_CHANNEL_KEY => wechat_binding_map.get(account_id).cloned(),
                     _ => None,
                 };
                 let bound_agent_name = bound_agent_id
@@ -2931,7 +3095,7 @@ fn build_channels_snapshot_payload() -> serde_json::Value {
         let name = channel_snapshot_name(channel, None, account_id);
         let bound_agent_id = match channel_name.as_str() {
             "feishu" => feishu_binding_map.get(account_id).cloned(),
-            "wechat" => wechat_binding_map.get(account_id).cloned(),
+            ch if ch == WECHAT_CHANNEL_KEY => wechat_binding_map.get(account_id).cloned(),
             _ => None,
         };
         let bound_agent_name = bound_agent_id
@@ -3350,7 +3514,7 @@ pub(crate) async fn remove_channel(channel: String, account: Option<String>) -> 
         };
     }
 
-    if channel.eq_ignore_ascii_case("wechat") {
+    if channel.eq_ignore_ascii_case(WECHAT_CHANNEL_KEY) {
         let account_id = account
             .as_deref()
             .map(str::trim)
@@ -3359,7 +3523,7 @@ pub(crate) async fn remove_channel(channel: String, account: Option<String>) -> 
             .to_string();
         let mut config = read_openclaw_config().unwrap_or_else(|| serde_json::json!({}));
 
-        let has_wechat = config.pointer("/channels/wechat").is_some();
+        let has_wechat = config.pointer(&format!("/channels/{}", WECHAT_CHANNEL_KEY)).is_some();
         if !has_wechat {
             return CommandResult {
                 success: true,
@@ -3370,7 +3534,7 @@ pub(crate) async fn remove_channel(channel: String, account: Option<String>) -> 
         }
 
         let has_account_map = config
-            .pointer("/channels/wechat/accounts")
+            .pointer(&format!("/channels/{}/accounts", WECHAT_CHANNEL_KEY))
             .and_then(|value| value.as_object())
             .map(|value| !value.is_empty())
             .unwrap_or(false);
@@ -3380,7 +3544,7 @@ pub(crate) async fn remove_channel(channel: String, account: Option<String>) -> 
                 .get_mut("channels")
                 .and_then(|value| value.as_object_mut())
             {
-                channels.remove("wechat");
+                channels.remove(WECHAT_CHANNEL_KEY);
             }
             if let Some(bindings) = config
                 .get_mut("bindings")
@@ -3405,7 +3569,7 @@ pub(crate) async fn remove_channel(channel: String, account: Option<String>) -> 
         }
 
         if let Some(accounts) = config
-            .pointer_mut("/channels/wechat/accounts")
+            .pointer_mut(&format!("/channels/{}/accounts", WECHAT_CHANNEL_KEY))
             .and_then(|value| value.as_object_mut())
         {
             accounts.remove(&account_id);
@@ -3416,7 +3580,7 @@ pub(crate) async fn remove_channel(channel: String, account: Option<String>) -> 
                     .get_mut("channels")
                     .and_then(|value| value.as_object_mut())
                 {
-                    channels.remove("wechat");
+                    channels.remove(WECHAT_CHANNEL_KEY);
                 }
                 if let Some(bindings) = config
                     .get_mut("bindings")
@@ -3426,11 +3590,11 @@ pub(crate) async fn remove_channel(channel: String, account: Option<String>) -> 
                 }
             } else {
                 let current_default = config
-                    .pointer("/channels/wechat/defaultAccount")
+                    .pointer(&format!("/channels/{}/defaultAccount", WECHAT_CHANNEL_KEY))
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
                 if current_default == account_id {
-                    config["channels"]["wechat"]["defaultAccount"] =
+                    config["channels"][WECHAT_CHANNEL_KEY]["defaultAccount"] =
                         serde_json::json!(remaining[0].clone());
                 }
                 if let Some(bindings) = config
