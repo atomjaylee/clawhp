@@ -40,10 +40,6 @@ interface RefreshCandidate {
 }
 
 const DEFAULT_PROVIDER_API: ProviderApiAdapter = "openai-completions";
-const PROVIDER_API_OPTIONS: ProviderApiAdapter[] = [
-  DEFAULT_PROVIDER_API,
-  "anthropic-messages",
-];
 const PROVIDER_API_META: Record<ProviderApiAdapter, {
   label: string;
   shortLabel: string;
@@ -92,6 +88,15 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     defaultName: "ollama",
     apiAdapter: "openai-completions",
     defaultKey: "ollama",
+  },
+  {
+    id: "bailian",
+    title: "阿里百炼",
+    badge: "官方",
+    description: "阿里云百炼官方入口，获取模型时会直接返回内置推荐模型列表。",
+    baseUrl: "https://coding.dashscope.aliyuncs.com/v1",
+    defaultName: "bailian",
+    apiAdapter: "openai-completions",
   },
   {
     id: "anthropic",
@@ -427,38 +432,7 @@ export default function ModelsPage() {
                 <Card>
                   <CardContent className="p-5 space-y-4">
                     <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-2.5 text-[12px] text-muted-foreground">
-                      先选常用预设，或者手动选择兼容协议后填写 URL、Key 和 Provider 名称。
-                    </div>
-                    <div>
-                      <label className="text-[12px] text-muted-foreground mb-1.5 block">兼容协议</label>
-                      <div className="grid gap-2 sm:grid-cols-2">
-                        {PROVIDER_API_OPTIONS.map((api) => {
-                          const meta = PROVIDER_API_META[api];
-                          const active = addApiAdapter === api;
-                          return (
-                            <button
-                              key={api}
-                              type="button"
-                              onClick={() => setAddApiAdapter(api)}
-                              className={`rounded-xl border px-3 py-3 text-left transition-colors ${
-                                active
-                                  ? "border-primary/35 bg-primary/[0.08]"
-                                  : "border-white/[0.06] bg-white/[0.03] hover:bg-white/[0.05]"
-                              }`}
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-[13px] font-medium text-foreground/90">{meta.label}</span>
-                                {active ? (
-                                  <Badge className="h-5 border-0 bg-primary/15 text-[10px] text-primary">
-                                    当前
-                                  </Badge>
-                                ) : null}
-                              </div>
-                              <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">{meta.description}</p>
-                            </button>
-                          );
-                        })}
-                      </div>
+                      先选常用预设，或者直接填写 URL、Key 和 Provider 名称。
                     </div>
                     <div>
                       <label className="text-[12px] text-muted-foreground mb-1.5 block">API 地址</label>
@@ -473,7 +447,7 @@ export default function ModelsPage() {
                       <input className={inputCls} placeholder="自动生成或自定义" value={addName} onChange={(e) => setAddName(e.target.value)} />
                     </div>
                     <div className="rounded-xl border border-white/[0.06] bg-black/10 px-3 py-2 text-[11px] text-muted-foreground">
-                      当前会按 <span className="font-medium text-foreground/85">{addApiMeta.label}</span> 协议去拉取模型列表，并把这个协议一起写入 Provider 配置。
+                      预设会自动带入推荐配置；手动新增默认按常见接口拉取模型列表。
                     </div>
                     <div className="pt-1">
                       <Button size="sm" onClick={handleFetchRemote} disabled={!addUrl || !addKey || fetchingModels}>
@@ -733,7 +707,7 @@ export default function ModelsPage() {
                   已配置内容会优先显示在这里。新增 Provider 时再选择预设，页面不会把常用操作挤到下面。
                 </div>
                 <Button size="sm" variant="outline" onClick={() => setView("add")}>
-                  <Plus /> 新增一个兼容入口
+                  <Plus /> 新增一个 Provider
                 </Button>
               </CardContent>
             </Card>
@@ -1151,7 +1125,7 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
       </div>
       <h3 className="text-sm font-medium mb-1">还没有配置模型</h3>
       <p className="text-[12px] text-muted-foreground mb-5 max-w-[260px]">
-        先选一个常用入口，或者手动添加 OpenAI / Anthropic 兼容 URL 来同步模型。
+        先选一个常用入口，或者手动填写 URL 和 Key 来同步模型。
       </p>
       <Button size="sm" onClick={onAdd}>
         <Plus /> 添加 Provider
@@ -1171,11 +1145,11 @@ function PresetGallery({ onSelect, compact = false }: {
           <div>
             <h3 className="text-[13px] font-semibold">常用 Provider 预设</h3>
             <p className="text-[11px] text-muted-foreground mt-1">
-              保留最常用的 4 个入口，覆盖 OpenAI 和 Anthropic 两类兼容协议。
+              先用预设快速填好地址和名称，后面再按需要微调。
             </p>
           </div>
           <Badge className="border-0 bg-violet-500/10 text-violet-400 text-[10px]">
-            双协议
+            5 个常用项
           </Badge>
         </div>
 

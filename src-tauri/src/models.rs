@@ -28,12 +28,135 @@ pub struct ProviderInfo {
 const OPENAI_COMPLETIONS_API: &str = "openai-completions";
 const ANTHROPIC_MESSAGES_API: &str = "anthropic-messages";
 const ANTHROPIC_VERSION_HEADER: &str = "2023-06-01";
+const BAILIAN_HOST: &str = "coding.dashscope.aliyuncs.com";
+
+struct BuiltinModelSpec {
+    id: &'static str,
+    reasoning: bool,
+    input: &'static [&'static str],
+    context_window: u64,
+    max_tokens: u64,
+    thinking_format: Option<&'static str>,
+}
+
+const BAILIAN_MODEL_SPECS: &[BuiltinModelSpec] = &[
+    BuiltinModelSpec {
+        id: "qwen3.5-plus",
+        reasoning: false,
+        input: &["text", "image"],
+        context_window: 1_000_000,
+        max_tokens: 65_536,
+        thinking_format: Some("qwen"),
+    },
+    BuiltinModelSpec {
+        id: "qwen3-max-2026-01-23",
+        reasoning: false,
+        input: &["text"],
+        context_window: 262_144,
+        max_tokens: 65_536,
+        thinking_format: Some("qwen"),
+    },
+    BuiltinModelSpec {
+        id: "qwen3-coder-next",
+        reasoning: false,
+        input: &["text"],
+        context_window: 262_144,
+        max_tokens: 65_536,
+        thinking_format: None,
+    },
+    BuiltinModelSpec {
+        id: "qwen3-coder-plus",
+        reasoning: false,
+        input: &["text"],
+        context_window: 1_000_000,
+        max_tokens: 65_536,
+        thinking_format: None,
+    },
+    BuiltinModelSpec {
+        id: "MiniMax-M2.5",
+        reasoning: false,
+        input: &["text"],
+        context_window: 196_608,
+        max_tokens: 32_768,
+        thinking_format: None,
+    },
+    BuiltinModelSpec {
+        id: "glm-5",
+        reasoning: false,
+        input: &["text"],
+        context_window: 202_752,
+        max_tokens: 16_384,
+        thinking_format: Some("qwen"),
+    },
+    BuiltinModelSpec {
+        id: "glm-4.7",
+        reasoning: false,
+        input: &["text"],
+        context_window: 202_752,
+        max_tokens: 16_384,
+        thinking_format: Some("qwen"),
+    },
+    BuiltinModelSpec {
+        id: "kimi-k2.5",
+        reasoning: false,
+        input: &["text", "image"],
+        context_window: 262_144,
+        max_tokens: 32_768,
+        thinking_format: Some("qwen"),
+    },
+];
 
 fn normalize_provider_api(api: Option<&str>) -> &'static str {
     match api.map(str::trim) {
         Some(ANTHROPIC_MESSAGES_API) => ANTHROPIC_MESSAGES_API,
         _ => OPENAI_COMPLETIONS_API,
     }
+}
+
+fn provider_host(base_url: &str) -> &str {
+    let trimmed = base_url.trim();
+    let without_scheme = trimmed.split_once("://").map(|(_, rest)| rest).unwrap_or(trimmed);
+    without_scheme
+        .split('/')
+        .next()
+        .unwrap_or(without_scheme)
+        .split('@')
+        .next_back()
+        .unwrap_or(without_scheme)
+        .split(':')
+        .next()
+        .unwrap_or(without_scheme)
+}
+
+fn is_bailian_base_url(base_url: &str) -> bool {
+    provider_host(base_url).eq_ignore_ascii_case(BAILIAN_HOST)
+}
+
+fn builtin_model_spec_for_provider(
+    base_url: Option<&str>,
+    model_id: &str,
+) -> Option<&'static BuiltinModelSpec> {
+    let base_url = base_url?;
+    if !is_bailian_base_url(base_url) {
+        return None;
+    }
+
+    BAILIAN_MODEL_SPECS
+        .iter()
+        .find(|spec| spec.id.eq_ignore_ascii_case(model_id))
+}
+
+fn builtin_model_ids_for_provider(base_url: &str) -> Option<Vec<String>> {
+    if !is_bailian_base_url(base_url) {
+        return None;
+    }
+
+    Some(
+        BAILIAN_MODEL_SPECS
+            .iter()
+            .map(|spec| spec.id.to_string())
+            .collect(),
+    )
 }
 
 fn provider_api_from_config(provider: &serde_json::Value) -> String {
@@ -161,6 +284,17 @@ pub(crate) fn fetch_remote_models(
     api_adapter: Option<String>,
 ) -> CommandResult {
     let provider_api = normalize_provider_api(api_adapter.as_deref());
+
+    if let Some(ids) = builtin_model_ids_for_provider(&base_url) {
+        let ids_json = serde_json::to_string(&ids).unwrap_or_default();
+        return CommandResult {
+            success: true,
+            stdout: ids_json,
+            stderr: String::new(),
+            code: Some(0),
+        };
+    }
+
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut args = vec![
         "-s".to_string(),
@@ -398,6 +532,48 @@ fn build_model_json(model_id: &str, api_adapter: &str) -> serde_json::Value {
     })
 }
 
+fn build_builtin_model_json(
+    model_id: &str,
+    api_adapter: &str,
+    spec: &BuiltinModelSpec,
+) -> serde_json::Value {
+    let mut model = serde_json::json!({
+        "id": spec.id,
+        "name": spec.id,
+        "reasoning": spec.reasoning,
+        "input": spec.input,
+        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+        "contextWindow": spec.context_window,
+        "maxTokens": spec.max_tokens,
+        "api": normalize_provider_api(Some(api_adapter))
+    });
+
+    if model_id != spec.id {
+        model["id"] = serde_json::Value::String(model_id.to_string());
+        model["name"] = serde_json::Value::String(model_id.to_string());
+    }
+
+    if let Some(thinking_format) = spec.thinking_format {
+        model["compat"] = serde_json::json!({
+            "thinkingFormat": thinking_format
+        });
+    }
+
+    model
+}
+
+fn build_model_json_for_provider(
+    model_id: &str,
+    api_adapter: &str,
+    base_url: Option<&str>,
+) -> serde_json::Value {
+    if let Some(spec) = builtin_model_spec_for_provider(base_url, model_id) {
+        build_builtin_model_json(model_id, api_adapter, spec)
+    } else {
+        build_model_json(model_id, api_adapter)
+    }
+}
+
 fn dedupe_model_ids(model_ids: Vec<String>) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut result = Vec::new();
@@ -576,6 +752,7 @@ pub(crate) fn sync_models_to_provider(
                     .unwrap_or("")
                     != api_key.as_str()
                 || provider_api_from_config(provider) != provider_api
+                || is_bailian_base_url(base_url.as_str())
         })
         .unwrap_or(false);
 
@@ -598,7 +775,11 @@ pub(crate) fn sync_models_to_provider(
             skip += 1;
             continue;
         }
-        new_models.push(build_model_json(mid, provider_api));
+        new_models.push(build_model_json_for_provider(
+            mid,
+            provider_api,
+            Some(base_url.as_str()),
+        ));
     }
 
     if new_models.is_empty() && !metadata_changed {
@@ -617,7 +798,15 @@ pub(crate) fn sync_models_to_provider(
 
         if let Some(models) = provider.get_mut("models").and_then(|m| m.as_array_mut()) {
             for model in models.iter_mut() {
-                ensure_model_api(model, provider_api);
+                if let Some(model_id) = model.get("id").and_then(|value| value.as_str()) {
+                    *model = build_model_json_for_provider(
+                        model_id,
+                        provider_api,
+                        Some(base_url.as_str()),
+                    );
+                } else {
+                    ensure_model_api(model, provider_api);
+                }
             }
             for m in &new_models {
                 models.push(m.clone());
@@ -759,15 +948,20 @@ pub(crate) fn reconcile_provider_models(
         let final_models = selected_model_ids
             .iter()
             .map(|model_id| {
-                let mut model = existing_models
-                    .iter()
-                    .find(|model| {
-                        model.get("id").and_then(|value| value.as_str()) == Some(model_id.as_str())
-                    })
-                    .cloned()
-                    .unwrap_or_else(|| build_model_json(model_id, provider_api));
-                ensure_model_api(&mut model, provider_api);
-                model
+                if builtin_model_spec_for_provider(Some(base_url.as_str()), model_id).is_some() {
+                    build_model_json_for_provider(model_id, provider_api, Some(base_url.as_str()))
+                } else {
+                    let mut model = existing_models
+                        .iter()
+                        .find(|model| {
+                            model.get("id").and_then(|value| value.as_str())
+                                == Some(model_id.as_str())
+                        })
+                        .cloned()
+                        .unwrap_or_else(|| build_model_json(model_id, provider_api));
+                    ensure_model_api(&mut model, provider_api);
+                    model
+                }
             })
             .collect::<Vec<_>>();
 
@@ -1048,5 +1242,59 @@ pub(crate) fn remove_models_from_provider(
             stderr: e,
             code: Some(1),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_model_json_adds_qwen_compat_for_qwen35_plus() {
+        let model = build_model_json_for_provider(
+            "qwen3.5-plus",
+            OPENAI_COMPLETIONS_API,
+            Some("https://coding.dashscope.aliyuncs.com/v1"),
+        );
+
+        assert_eq!(
+            model.pointer("/compat/thinkingFormat").and_then(|v| v.as_str()),
+            Some("qwen")
+        );
+        assert_eq!(
+            model.get("contextWindow").and_then(|v| v.as_u64()),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            model.get("maxTokens").and_then(|v| v.as_u64()),
+            Some(65_536)
+        );
+    }
+
+    #[test]
+    fn build_model_json_uses_official_minimax_m25_limits() {
+        let model = build_model_json_for_provider(
+            "MiniMax-M2.5",
+            OPENAI_COMPLETIONS_API,
+            Some("https://coding.dashscope.aliyuncs.com/v1"),
+        );
+
+        assert_eq!(
+            model.get("contextWindow").and_then(|v| v.as_u64()),
+            Some(196_608)
+        );
+        assert_eq!(
+            model.get("maxTokens").and_then(|v| v.as_u64()),
+            Some(32_768)
+        );
+    }
+
+    #[test]
+    fn builtin_model_ids_are_returned_for_bailian_provider() {
+        let ids = builtin_model_ids_for_provider("https://coding.dashscope.aliyuncs.com/v1")
+            .expect("bailian builtin models should exist");
+
+        assert!(ids.iter().any(|id| id == "qwen3.5-plus"));
+        assert!(ids.iter().any(|id| id == "kimi-k2.5"));
     }
 }
