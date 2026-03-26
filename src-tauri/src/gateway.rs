@@ -63,19 +63,28 @@ pub(crate) async fn start_gateway(port: Option<u16>) -> CommandResult {
 
 /// Check if the gateway port is reachable (used as a fast status fallback).
 #[tauri::command]
-pub(crate) fn check_gateway_port(port: Option<u16>) -> CommandResult {
+pub(crate) async fn check_gateway_port(port: Option<u16>) -> CommandResult {
     let port = port.unwrap_or(18789);
-    let open = install::check_port(port);
-    CommandResult {
-        success: open,
-        stdout: if open {
-            format!("端口 {} 已开放", port)
-        } else {
-            format!("端口 {} 未开放", port)
-        },
-        stderr: String::new(),
-        code: if open { Some(0) } else { Some(1) },
-    }
+    tokio::task::spawn_blocking(move || {
+        let open = install::check_port(port);
+        CommandResult {
+            success: open,
+            stdout: if open {
+                format!("端口 {} 已开放", port)
+            } else {
+                format!("端口 {} 未开放", port)
+            },
+            stderr: String::new(),
+            code: if open { Some(0) } else { Some(1) },
+        }
+    })
+    .await
+    .unwrap_or_else(|e| CommandResult {
+        success: false,
+        stdout: String::new(),
+        stderr: format!("Task panic: {}", e),
+        code: None,
+    })
 }
 
 #[tauri::command]

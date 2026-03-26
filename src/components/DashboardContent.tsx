@@ -32,9 +32,10 @@ type GatewayStatus = "unknown" | "checking" | "running" | "stopped" | "starting"
 type Tone = "neutral" | "good" | "warn" | "danger";
 type DashboardModuleTab = "overview" | "actions" | "system";
 
-const PORT_POLL_INTERVAL = 5000;
+const PORT_POLL_INTERVAL = 8000;
 const SNAPSHOT_POLL_INTERVAL = 30000;
-const INITIAL_DEEP_SNAPSHOT_DELAY_MS = 1800;
+const INITIAL_DEEP_SNAPSHOT_DELAY_MS = 3500;
+const SNAPSHOT_CLIENT_TIMEOUT_MS = 20000;
 
 interface GatewayLogEvent {
   level: string;
@@ -129,22 +130,38 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   const [moduleTab, setModuleTab] = useState<DashboardModuleTab>("overview");
   const [snapshotAttempted, setSnapshotAttempted] = useState(false);
   const snapshotRefreshRef = useRef<Promise<void> | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const checkGateway = useCallback(async () => {
     try {
       const r: CommandResult = await invoke("check_gateway_port", { port: gatewayPort });
-      setGwStatus(r.success ? "running" : "stopped");
+      if (mountedRef.current) {
+        setGwStatus(r.success ? "running" : "stopped");
+      }
     } catch {
-      setGwStatus("stopped");
+      if (mountedRef.current) {
+        setGwStatus("stopped");
+      }
     }
   }, [gatewayPort]);
 
   const refreshConfiguredChannels = useCallback(async () => {
     try {
       const result: CommandResult = await invoke("list_channels_snapshot");
-      setConfiguredChannelCount(countConfiguredChannelsFromSnapshot(result));
+      if (mountedRef.current) {
+        setConfiguredChannelCount(countConfiguredChannelsFromSnapshot(result));
+      }
     } catch {
-      setConfiguredChannelCount(0);
+      if (mountedRef.current) {
+        setConfiguredChannelCount(0);
+      }
     }
   }, []);
 
@@ -155,13 +172,30 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
 
     setSnapshotAttempted(true);
     setStatusLoading(true);
+
     const task = (async () => {
       try {
-        const [gatewayResult, runtimeResult, auditResult] = await Promise.allSettled([
+        const snapshotWork = Promise.allSettled([
           invoke<CommandResult>("get_gateway_status_snapshot"),
           invoke<CommandResult>("get_runtime_status_snapshot"),
           invoke<CommandResult>("get_security_audit_snapshot"),
         ]);
+
+        const timeout = new Promise<"timeout">((resolve) =>
+          window.setTimeout(() => resolve("timeout"), SNAPSHOT_CLIENT_TIMEOUT_MS),
+        );
+
+        const result = await Promise.race([snapshotWork, timeout]);
+
+        if (!mountedRef.current) {
+          return;
+        }
+
+        if (result === "timeout") {
+          return;
+        }
+
+        const [gatewayResult, runtimeResult, auditResult] = result;
 
         let nextGateway: GatewaySnapshot | null = null;
         let nextRuntime: RuntimeSnapshot | null = null;
@@ -196,7 +230,9 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
         }
       } finally {
         snapshotRefreshRef.current = null;
-        setStatusLoading(false);
+        if (mountedRef.current) {
+          setStatusLoading(false);
+        }
       }
     })();
 
@@ -207,9 +243,13 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
   const refreshConfiguredPrimaryModel = useCallback(async () => {
     try {
       const nextPrimary = await invoke<string>("get_primary_model");
-      setConfiguredPrimaryModel(nextPrimary || null);
+      if (mountedRef.current) {
+        setConfiguredPrimaryModel(nextPrimary || null);
+      }
     } catch {
-      setConfiguredPrimaryModel(null);
+      if (mountedRef.current) {
+        setConfiguredPrimaryModel(null);
+      }
     }
   }, []);
 
@@ -257,6 +297,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
 
   useEffect(() => {
     const unlisten = listen<GatewayLogEvent>("gateway-log", (event) => {
+      if (!mountedRef.current) return;
       const { level, message } = event.payload;
 
       if (level === "info" && message.includes("就绪")) {
@@ -276,13 +317,14 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [refreshSnapshots]);
+  }, [refreshSnapshots, refreshConfiguredChannels]);
 
   const handleStartGateway = async () => {
     setGwStatus("starting");
     setGwMessage("");
     try {
       const r: CommandResult = await invoke("start_gateway_with_recovery", { port: gatewayPort });
+      if (!mountedRef.current) return;
       if (r.success) {
         setGwStatus("running");
         setGwMessage(firstMeaningfulLine(r.stdout) ?? "网关已启动");
@@ -291,11 +333,14 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
         setGwMessage(r.stderr || "启动失败");
       }
     } catch (e) {
+      if (!mountedRef.current) return;
       setGwStatus("stopped");
       setGwMessage(`${e}`);
     } finally {
-      await checkGateway();
-      await refreshSnapshots();
+      if (mountedRef.current) {
+        await checkGateway();
+        await refreshSnapshots();
+      }
     }
   };
 
@@ -304,6 +349,7 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
     setGwMessage("");
     try {
       const r: CommandResult = await invoke("restart_gateway_with_recovery", { port: gatewayPort });
+      if (!mountedRef.current) return;
       if (r.success) {
         setGwStatus("running");
         setGwMessage(firstMeaningfulLine(r.stdout) ?? "网关已重启");
@@ -312,15 +358,18 @@ export default function DashboardContent({ systemInfo, onNavigate }: Props) {
         setGwMessage(r.stderr || "重启失败");
       }
     } catch (e) {
+      if (!mountedRef.current) return;
       setGwStatus("stopped");
       setGwMessage(`${e}`);
     } finally {
-      await checkGateway();
-      await Promise.all([
-        refreshSnapshots(),
-        refreshConfiguredChannels(),
-        refreshConfiguredPrimaryModel(),
-      ]);
+      if (mountedRef.current) {
+        await checkGateway();
+        await Promise.all([
+          refreshSnapshots(),
+          refreshConfiguredChannels(),
+          refreshConfiguredPrimaryModel(),
+        ]);
+      }
     }
   };
 

@@ -98,6 +98,25 @@ pub(crate) fn run_cmd_owned_timeout(
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
+                    let reap_deadline = std::time::Instant::now() + Duration::from_secs(3);
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(_)) => break,
+                            Ok(None) if std::time::Instant::now() >= reap_deadline => {
+                                return CommandResult {
+                                    success: false,
+                                    stdout: String::new(),
+                                    stderr: format!(
+                                        "命令执行超时（{} 秒）且进程无法终止",
+                                        timeout.as_secs()
+                                    ),
+                                    code: None,
+                                };
+                            }
+                            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                            Err(_) => break,
+                        }
+                    }
                     return match child.wait_with_output() {
                         Ok(output) => {
                             let stdout = clean_line(&String::from_utf8_lossy(&output.stdout));
